@@ -1,0 +1,1402 @@
+from datetime import datetime, timedelta
+import json
+import math
+import uuid
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+
+app = FastAPI(title="Kesişen Yollar API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+ROOMS = {}
+
+
+def haversine_distance(coord1, coord2):
+  r = 6371000
+  lat1, lon1 = map(math.radians, coord1)
+  lat2, lon2 = map(math.radians, coord2)
+  dlat = lat2 - lat1
+  dlon = lon2 - lon1
+  a = (
+      math.sin(dlat / 2) ** 2
+      + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+  )
+  return r * (2 * math.asin(math.sqrt(a)))
+
+
+def parse_takeout(content_bytes):
+  try:
+    data = json.loads(content_bytes.decode("utf-8"))
+  except Exception:
+    raise HTTPException(status_code=400, detail="Geçersiz JSON dosyası.")
+
+  locations = data.get("locations", [])
+  if not locations and isinstance(data, list):
+    locations = data
+
+  parsed = []
+  for loc in locations:
+    timestamp_str = loc.get("timestamp") or loc.get("time")
+    lat = loc.get("latitudeE7")
+    lon = loc.get("longitudeE7")
+
+    if lat is not None and lon is not None:
+      lat_deg = lat / 1e7
+      lon_deg = lon / 1e7
+    elif "latitude" in loc and "longitude" in loc:
+      lat_deg = loc["latitude"]
+      lon_deg = loc["longitude"]
+    else:
+      continue
+
+    if timestamp_str:
+      try:
+        ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        parsed.append({"timestamp": ts, "lat": lat_deg, "lon": lon_deg})
+      except Exception:
+        continue
+
+  parsed.sort(key=lambda x: x["timestamp"])
+  return parsed
+
+
+def calculate_matches(points_a, points_b, max_dist=200, max_time_sec=1800):
+  encounters = []
+  i, j = 0, 0
+  len_a, len_b = len(points_a), len(points_b)
+
+  while i < len_a and j < len_b:
+    t_a = points_a[i]["timestamp"]
+    t_b = points_b[j]["timestamp"]
+    diff = (t_a - t_b).total_seconds()
+
+    if abs(diff) <= max_time_sec:
+      dist = haversine_distance(
+          (points_a[i]["lat"], points_a[i]["lon"]),
+          (points_b[j]["lat"], points_b[j]["lon"]),
+      )
+      if dist <= max_dist:
+        encounters.append({
+            "date": t_a.strftime("%d.%m.%Y %H:%M"),
+            "lat": round((points_a[i]["lat"] + points_b[j]["lat"]) / 2, 6),
+            "lon": round((points_a[i]["lon"] + points_b[j]["lon"]) / 2, 6),
+            "distance_m": round(dist, 1),
+        })
+
+    if t_a < t_b:
+      i += 1
+    else:
+      j += 1
+
+  return encounters
+
+
+HTML_PAGE = """
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kesişen Yollar | Kaderinizi Keşfedin</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col items-center justify-center p-4 selection:bg-rose-500 selection:text-white">
+    <div class="max-w-xl w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 md:p-8 shadow-2xl relative">
+        <div class="text-center mb-6">
+            <span class="inline-block px-3 py-1 bg-rose-500/10 text-rose-400 text-xs font-semibold rounded-full border border-rose-500/20 mb-3">İlişki & Kader Analizi</span>
+            <h1 class="text-3xl font-extrabold tracking-tight text-white">Yollarınız Kaç Kez Kesişti?</h1>
+            <p class="text-slate-400 text-xs mt-2 max-w-md mx-auto">Tanışmadan önce aynı mekanda, aynı dakikalarda bulunmuş muydunuz? Konum geçmişinizi karşılaştırın.</p>
+            <div class="mt-3 inline-flex items-center gap-1.5 text-[11px] text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-3 py-1 rounded-full">
+                <span>🛡️</span> <span>Sıfır Saklama: Ham verileriniz analiz bittiği an sunucudan kalıcı olarak silinir.</span>
+            </div>
+        </div>
+
+        <div id="uploadSection" class="space-y-5">
+            <div class="flex bg-slate-950 p-1 rounded-2xl border border-slate-800 text-xs font-semibold">
+                <button id="tabTogetherBtn" onclick="switchTab('together')" class="flex-1 py-2 rounded-xl bg-rose-500 text-white transition">Yan Yana (Tek Cihaz)</button>
+                <button id="tabRemoteBtn" onclick="switchTab('remote')" class="flex-1 py-2 rounded-xl text-slate-400 hover:text-white transition">Uzaktan (Link ile)</button>
+            </div>
+
+            <div id="modeTogether" class="space-y-3">
+                <div class="p-3.5 bg-slate-950/60 border border-slate-800 rounded-2xl">
+                    <label class="block text-xs font-semibold text-rose-400 mb-1">1. Partnerin Dosyası (.json)</label>
+                    <input type="file" id="fileUser1" accept=".json" class="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-rose-400 hover:file:bg-slate-700 cursor-pointer">
+                </div>
+                <div class="p-3.5 bg-slate-950/60 border border-slate-800 rounded-2xl">
+                    <label class="block text-xs font-semibold text-rose-400 mb-1">2. Partnerin Dosyası (.json)</label>
+                    <input type="file" id="fileUser2" accept=".json" class="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-rose-400 hover:file:bg-slate-700 cursor-pointer">
+                </div>
+                <button onclick="compareTogether()" class="w-full bg-rose-500 hover:bg-rose-600 text-white font-bold py-3 rounded-2xl text-xs transition shadow-lg shadow-rose-500/20">
+                    Kesişmeleri Şimdi Karşılaştır
+                </button>
+            </div>
+
+            <div id="modeRemote" class="space-y-3 hidden">
+                <div class="p-3.5 bg-slate-950/60 border border-slate-800 rounded-2xl">
+                    <label class="block text-xs font-semibold text-slate-300 mb-1">Kendi Dosyanızı Seçin (.json)</label>
+                    <input type="file" id="fileRemote" accept=".json" class="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-white hover:file:bg-slate-700 cursor-pointer">
+                </div>
+                <div class="grid grid-cols-2 gap-2 pt-1">
+                    <button onclick="createRoomRemote()" class="bg-rose-500 hover:bg-rose-600 text-white font-medium py-2.5 px-3 rounded-xl text-xs transition">Oda Aç & Kod Al</button>
+                    <div class="flex gap-1.5">
+                        <input type="text" id="remoteCodeInput" placeholder="Oda Kodu" class="w-2/3 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs focus:outline-none focus:border-rose-500 uppercase">
+                        <button onclick="joinRoomRemote()" class="w-1/3 bg-slate-800 hover:bg-slate-700 text-white font-medium py-2 rounded-xl text-xs transition">Katıl</button>
+                    </div>
+                </div>
+                <div id="roomAlert" class="hidden p-3 bg-slate-950 border border-rose-800/40 rounded-xl text-xs text-center text-rose-300"></div>
+            </div>
+
+            <div class="text-center pt-2">
+                <details class="text-[11px] text-slate-400 cursor-pointer">
+                    <summary class="hover:text-rose-400">❓ Google Konum Dosyası (Takeout) Nasıl İndirilir?</summary>
+                    <div class="mt-3 p-3 bg-slate-950 rounded-xl border border-slate-800 text-left space-y-1.5 text-slate-300">
+                        <div>1. <b>takeout.google.com</b> adresine gidin.</div>
+                        <div>2. Tüm seçimleri kaldırıp yalnızca <b>Konum Geçmişi (Zaman Çizelgesi)</b>'ni seçin.</div>
+                        <div>3. Formatı <b>JSON</b> seçip dışa aktarımı başlatın. İnen zip içindeki <i>Records.json</i> dosyasını buraya yükleyin.</div>
+                    </div>
+                </details>
+            </div>
+
+            <div class="pt-2 text-center">
+                <button onclick="startDemo()" class="text-[11px] text-slate-500 hover:text-rose-400 underline transition">
+                    ⚡ Dosya yüklemeden örnek demoyu çalıştır
+                </button>
+            </div>
+        </div>
+
+        <div id="previewSection" class="hidden space-y-6">
+            <div class="text-center py-4 bg-slate-950 border border-slate-800 rounded-2xl">
+                <div class="text-5xl font-black text-rose-500 mb-1" id="encounterCount">0</div>
+                <div class="text-sm font-semibold text-slate-200">Kesişme Tespit Edildi! 🎉</div>
+                <div class="text-xs text-slate-400 mt-1">İlk karşılaşma: <span id="firstEncounterDate" class="text-rose-400 font-bold">-</span></div>
+            </div>
+
+            <div class="relative rounded-2xl overflow-hidden border border-slate-800">
+                <div id="mapBlur" class="h-64 w-full filter blur-md pointer-events-none"></div>
+                <div class="absolute inset-0 bg-slate-950/75 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center">
+                    <div class="w-12 h-12 bg-rose-500/20 text-rose-400 rounded-full flex items-center justify-center text-xl mb-3 border border-rose-500/30">🔒</div>
+                    <h3 class="text-base font-bold text-white mb-1">Tüm Konumlar & Zaman Tüneli Kilitli</h3>
+                    <p class="text-xs text-slate-400 max-w-xs mb-4">Hangi mekanlarda yan yana geldiğinizi harita üzerinde sokak sokak görün.</p>
+                    <button onclick="triggerPayment()" class="w-full max-w-xs bg-rose-500 hover:bg-rose-600 text-white font-bold py-3 px-6 rounded-xl text-xs transition shadow-lg shadow-rose-500/20">
+                        Detaylı Raporu Aç (99 ₺)
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="fullReportSection" class="hidden space-y-4">
+            <div class="flex items-center justify-between">
+                <h2 class="text-sm font-bold text-slate-200">Kader Haritası & Karşılaşma Noktaları</h2>
+                <span class="text-xs text-emerald-400 bg-emerald-950/50 border border-emerald-800 px-2 py-0.5 rounded-full">Ödendi ✓</span>
+            </div>
+            
+            <div id="paidMap" class="h-64 w-full rounded-2xl border border-slate-800"></div>
+
+            <button onclick="generateStoryCard()" class="w-full bg-gradient-to-r from-rose-500 to-purple-600 hover:opacity-90 text-white font-bold py-3 px-4 rounded-xl text-xs transition flex items-center justify-center gap-2 shadow-lg">
+                <span>📸</span> <span>Instagram Story Kartını İndir</span>
+            </button>
+
+            <div id="timelineList" class="max-h-40 overflow-y-auto space-y-2 pr-2 text-xs"></div>
+        </div>
+
+        <canvas id="storyCanvas" width="1080" height="1920" class="hidden"></canvas>
+    </div>
+
+    <script>
+        let currentRoomId = null;
+        let encountersData = [];
+
+        function switchTab(mode) {
+            const tabTog = document.getElementById('tabTogetherBtn');
+            const tabRem = document.getElementById('tabRemoteBtn');
+            const modeTog = document.getElementById('modeTogether');
+            const modeRem = document.getElementById('modeRemote');
+            if (mode === 'together') {
+                tabTog.className = 'flex-1 py-2 rounded-xl bg-rose-500 text-white transition';
+                tabRem.className = 'flex-1 py-2 rounded-xl text-slate-400 hover:text-white transition';
+                modeTog.classList.remove('hidden');
+                modeRem.classList.add('hidden');
+            } else {
+                tabRem.className = 'flex-1 py-2 rounded-xl bg-rose-500 text-white transition';
+                tabTog.className = 'flex-1 py-2 rounded-xl text-slate-400 hover:text-white transition';
+                modeRem.classList.remove('hidden');
+                modeTog.classList.add('hidden');
+            }
+        }
+
+        async function compareTogether() {
+            const f1 = document.getElementById('fileUser1').files[0];
+            const f2 = document.getElementById('fileUser2').files[0];
+            if (!f1 || !f2) return alert('Lütfen iki partnerin de JSON dosyasını seçin.');
+            const formData = new FormData();
+            formData.append('file1', f1);
+            formData.append('file2', f2);
+            const res = await fetch('/api/compare-together', { method: 'POST', body: formData });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || 'Bir hata oluştu.');
+            currentRoomId = data.room_id;
+            encountersData = data.encounters;
+            showPreview(data.total_encounters, encountersData[0]?.date || 'Bilinmiyor');
+        }
+
+        async function createRoomRemote() {
+            const f = document.getElementById('fileRemote').files[0];
+            if (!f) return alert('Lütfen önce bir .json dosyası seçin.');
+            const formData = new FormData();
+            formData.append('file', f);
+            const res = await fetch('/api/create-room', { method: 'POST', body: formData });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || 'Hata oluştu.');
+            currentRoomId = data.room_id;
+            const alertBox = document.getElementById('roomAlert');
+            alertBox.classList.remove('hidden');
+            alertBox.innerHTML = `Oda Kodunuz: <b class="text-white select-all text-sm">${data.room_id}</b><br><span class="text-slate-400 text-[11px]">Partneriniz bu kodu girip kendi dosyasını yüklemeli.</span>`;
+        }
+
+        async function joinRoomRemote() {
+            const code = document.getElementById('remoteCodeInput').value.trim().toUpperCase();
+            const f = document.getElementById('fileRemote').files[0];
+            if (!code || !f) return alert('Hem oda kodunu girin hem de dosyanızı seçin.');
+            const formData = new FormData();
+            formData.append('file', f);
+            const res = await fetch(`/api/join-room/${code}`, { method: 'POST', body: formData });
+            const data = await res.json();
+            if (!res.ok) return alert(data.detail || 'Bir hata oluştu.');
+            currentRoomId = code;
+            encountersData = data.encounters;
+            showPreview(data.total_encounters, encountersData[0]?.date || 'Bilinmiyor');
+        }
+
+        async function startDemo() {
+            const res = await fetch('/api/demo-room', { method: 'POST' });
+            const data = await res.json();
+            currentRoomId = data.room_id;
+            encountersData = data.encounters;
+            showPreview(data.total_encounters, encountersData[0]?.date);
+        }
+
+        function showPreview(count, firstDate) {
+            document.getElementById('uploadSection').classList.add('hidden');
+            document.getElementById('previewSection').classList.remove('hidden');
+            document.getElementById('encounterCount').innerText = count;
+            document.getElementById('firstEncounterDate').innerText = firstDate;
+            setTimeout(() => {
+                const blurMap = L.map('mapBlur', { zoomControl: false, attributionControl: false }).setView([41.0082, 28.9784], 12);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(blurMap);
+            }, 200);
+        }
+
+        async function triggerPayment() {
+            const res = await fetch(`/api/pay-room/${currentRoomId}`, { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'success') {
+                document.getElementById('previewSection').classList.add('hidden');
+                document.getElementById('fullReportSection').classList.remove('hidden');
+                renderPaidMap(encountersData);
+            }
+        }
+
+        function renderPaidMap(points) {
+            setTimeout(() => {
+                const first = points[0] || { lat: 41.0082, lon: 28.9784 };
+                const mapInstance = L.map('paidMap').setView([first.lat, first.lon], 13);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapInstance);
+                const timeline = document.getElementById('timelineList');
+                timeline.innerHTML = '';
+                points.forEach((p, index) => {
+                    L.marker([p.lat, p.lon]).addTo(mapInstance).bindPopup(`<b>Kesişme #${index + 1}</b><br>${p.date}<br>Mesafe: ${p.distance_m}m`);
+                    const item = document.createElement('div');
+                    item.className = 'p-3 bg-slate-950 border border-slate-800 rounded-xl flex justify-between items-center';
+                    item.innerHTML = `<div><div class="font-bold text-slate-200">#${index + 1} Karşılaşma</div><div class="text-[11px] text-slate-500">${p.date}</div></div><span class="text-rose-400 font-semibold text-[11px]">~${p.distance_m}m</span>`;
+                    timeline.appendChild(item);
+                });
+            }, 200);
+        }
+
+        function generateStoryCard() {
+            const canvas = document.getElementById('storyCanvas');
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createLinearGradient(0, 0, 0, 1920);
+            grad.addColorStop(0, '#090d16');
+            grad.addColorStop(0.5, '#1e112a');
+            grad.addColorStop(1, '#090d16');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 1080, 1920);
+
+            ctx.strokeStyle = 'rgba(244, 63, 94, 0.3)';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(60, 60, 960, 1800);
+
+            ctx.fillStyle = '#f43f5e';
+            ctx.font = 'bold 50px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('✨ KESİŞEN YOLLAR RAPORU', 540, 400);
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 70px sans-serif';
+            ctx.fillText('Tanışmadan Önce', 540, 520);
+            ctx.fillText('Yollarımız Kesişmiş!', 540, 610);
+
+            ctx.fillStyle = '#f43f5e';
+            ctx.font = '900 220px sans-serif';
+            ctx.fillText(encountersData.length.toString(), 540, 900);
+
+            ctx.fillStyle = '#cbd5e1';
+            ctx.font = '500 55px sans-serif';
+            ctx.fillText('Kez Aynı Yerdeydik', 540, 1000);
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.beginPath();
+            ctx.roundRect(160, 1150, 760, 220, [30]);
+            ctx.fill();
+
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '40px sans-serif';
+            ctx.fillText('İlk Karşılaşma Tarihi', 540, 1230);
+
+            ctx.fillStyle = '#fb7185';
+            ctx.font = 'bold 55px sans-serif';
+            ctx.fillText(encountersData[0]?.date || '-', 540, 1310);
+
+            ctx.fillStyle = '#64748b';
+            ctx.font = '36px sans-serif';
+            ctx.fillText('Sen de sevgilinle test et:', 540, 1680);
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 44px sans-serif';
+            ctx.fillText('kesisenyollar.com', 540, 1740);
+
+            const link = document.createElement('a');
+            link.download = 'kader-raporumuz.png';
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }
+    </script>
+</body>
+</html>
+"""
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_home():
+  return HTML_PAGE
+
+
+@app.post("/api/compare-together")
+async def compare_together(
+    file1: UploadFile = File(...), file2: UploadFile = File(...)
+):
+  p1 = parse_takeout(await file1.read())
+  p2 = parse_takeout(await file2.read())
+  encounters = calculate_matches(p1, p2)
+  room_id = str(uuid.uuid4())[:6].upper()
+  ROOMS[room_id] = {"encounters": encounters, "is_paid": False}
+  return {
+      "room_id": room_id,
+      "total_encounters": len(encounters),
+      "encounters": encounters,
+  }
+
+
+@app.post("/api/create-room")
+async def create_room(file: UploadFile):
+  content = await file.read()
+  user_points = parse_takeout(content)
+  room_id = str(uuid.uuid4())[:6].upper()
+  ROOMS[room_id] = {"points": user_points}
+  return {"room_id": room_id}
+
+
+@app.post("/api/join-room/{room_id}")
+async def join_room(room_id: str, file: UploadFile):
+  room_id = room_id.upper()
+  if room_id not in ROOMS:
+    raise HTTPException(
+        status_code=404, detail="Oda bulunamadı veya süresi doldu."
+    )
+  room = ROOMS[room_id]
+  content = await file.read()
+  user2_points = parse_takeout(content)
+  encounters = calculate_matches(room["points"], user2_points)
+  ROOMS[room_id] = {"encounters": encounters, "is_paid": False}
+  return {"total_encounters": len(encounters), "encounters": encounters}
+
+
+@app.post("/api/demo-room")
+async def demo_room():
+  base_time = datetime.now()
+  demo_encounters = [
+      {
+          "date": (base_time - timedelta(days=120, hours=3)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 40.9912,
+          "lon": 29.0256,
+          "distance_m": 42.5,
+      },
+      {
+          "date": (base_time - timedelta(days=95, hours=5)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 41.0422,
+          "lon": 29.0067,
+          "distance_m": 18.0,
+      },
+      {
+          "date": (base_time - timedelta(days=60, hours=1)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 41.0369,
+          "lon": 28.9850,
+          "distance_m": 85.2,
+      },
+      {
+          "date": (base_time - timedelta(days=40, hours=8)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 40.9835,
+          "lon": 29.0278,
+          "distance_m": 12.4,
+      },
+      {
+          "date": (base_time - timedelta(days=14, hours=2)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 41.0411,
+          "lon": 29.0090,
+          "distance_m": 55.0,
+      },
+  ]
+  room_id = "DEMO99"
+  ROOMS[room_id] = {"encounters": demo_encounters, "is_paid": False}
+  return {
+      "room_id": room_id,
+      "total_encounters": len(demo_encounters),
+      "encounters": demo_encounters,
+  }
+
+
+@app.post("/api/pay-room/{room_id}")
+async def pay_room(room_id: str):
+  return {"status": "success"}from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+
+app = FastAPI(title="Kesişen Yollar API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+ROOMS = {}
+
+
+def haversine_distance(coord1, coord2):
+  r = 6371000
+  lat1, lon1 = map(math.radians, coord1)
+  lat2, lon2 = map(math.radians, coord2)
+  dlat = lat2 - lat1
+  dlon = lon2 - lon1
+  a = (
+      math.sin(dlat / 2) ** 2
+      + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+
+  )
+  return r * (2 * math.asin(math.sqrt(a)))
+
+
+def parse_takeout(content_bytes):
+  try:
+    data = json.loads(content_bytes.decode("utf-8"))
+  except Exception:
+    raise HTTPException(status_code=400, detail="Geçersiz JSON dosyası.")
+
+  locations = data.get("locations", [])
+  if not locations and isinstance(data, list):
+    locations = data
+
+  parsed = []
+  for loc in locations:
+    timestamp_str = loc.get("timestamp") or loc.get("time")
+    lat = loc.get("latitudeE7")
+    lon = loc.get("longitudeE7")
+
+    if lat is not None and lon is not None:
+      lat_deg = lat / 1e7
+      lon_deg = lon / 1e7
+    elif "latitude" in loc and "longitude" in loc:
+      lat_deg = loc["latitude"]
+      lon_deg = loc["longitude"]
+    else:
+      continue
+
+    if timestamp_str:
+      try:
+        ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        parsed.append({"timestamp": ts, "lat": lat_deg, "lon": lon_deg})
+      except Exception:
+        continue
+
+  parsed.sort(key=lambda x: x["timestamp"])
+  return parsed
+
+
+def calculate_matches(points_a, points_b, max_dist=200, max_time_sec=1800):
+  encounters = []
+  i, j = 0, 0
+  len_a, len_b = len(points_a), len(points_b)
+
+  while i < len_a and j < len_b:
+    t_a = points_a[i]["timestamp"]
+    t_b = points_b[j]["timestamp"]
+    diff = (t_a - t_b).total_seconds()
+
+    if abs(diff) <= max_time_sec:
+      dist = haversine_distance(
+          (points_a[i]["lat"], points_a[i]["lon"]),
+          (points_b[j]["lat"], points_b[j]["lon"]),
+      )
+      if dist <= max_dist:
+        encounters.append({
+            "date": t_a.strftime("%d.%m.%Y %H:%M"),
+            "lat": round((points_a[i]["lat"] + points_b[j]["lat"]) / 2, 6),
+            "lon": round((points_a[i]["lon"] + points_b[j]["lon"]) / 2, 6),
+            "distance_m": round(dist, 1),
+        })
+
+    if t_a < t_b:
+      i += 1
+    else:
+      j += 1
+
+  return encounters
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_home():
+  return """
+    <!DOCTYPE html>
+    <html lang="tr">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Kesişen Yollar | Kaderinizi Keşfedin</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    </head>
+    <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col items-center justify-center p-4 selection:bg-rose-500 selection:text-white">
+        <div class="max-w-xl w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 md:p-8 shadow-2xl relative">
+            <div class="text-center mb-6">
+                <span class="inline-block px-3 py-1 bg-rose-500/10 text-rose-400 text-xs font-semibold rounded-full border border-rose-500/20 mb-3">İlişki & Kader Analizi</span>
+                <h1 class="text-3xl font-extrabold tracking-tight text-white">Yollarınız Kaç Kez Kesişti?</h1>
+                <p class="text-slate-400 text-xs mt-2 max-w-md mx-auto">Tanışmadan önce aynı mekanda, aynı dakikalarda bulunmuş muydunuz? Konum geçmişinizi karşılaştırın.</p>
+                <div class="mt-3 inline-flex items-center gap-1.5 text-[11px] text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-3 py-1 rounded-full">
+                    <span>🛡️</span> <span>Sıfır Saklama: Ham verileriniz analiz bittiği an sunucudan kalıcı olarak silinir.</span>
+                </div>
+            </div>
+
+            <div id="uploadSection" class="space-y-5">
+                <div class="flex bg-slate-950 p-1 rounded-2xl border border-slate-800 text-xs font-semibold">
+                    <button id="tabTogetherBtn" onclick="switchTab('together')" class="flex-1 py-2 rounded-xl bg-rose-500 text-white transition">Yan Yana (Tek Cihaz)</button>
+                    <button id="tabRemoteBtn" onclick="switchTab('remote')" class="flex-1 py-2 rounded-xl text-slate-400 hover:text-white transition">Uzaktan (Link ile)</button>
+                </div>
+
+                <div id="modeTogether" class="space-y-3">
+                    <div class="p-3.5 bg-slate-950/60 border border-slate-800 rounded-2xl">
+                        <label class="block text-xs font-semibold text-rose-400 mb-1">1. Partnerin Dosyası (.json)</label>
+                        <input type="file" id="fileUser1" accept=".json" class="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-rose-400 hover:file:bg-slate-700 cursor-pointer">
+                    </div>
+                    <div class="p-3.5 bg-slate-950/60 border border-slate-800 rounded-2xl">
+                        <label class="block text-xs font-semibold text-rose-400 mb-1">2. Partnerin Dosyası (.json)</label>
+                        <input type="file" id="fileUser2" accept=".json" class="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-rose-400 hover:file:bg-slate-700 cursor-pointer">
+                    </div>
+                    <button onclick="compareTogether()" class="w-full bg-rose-500 hover:bg-rose-600 text-white font-bold py-3 rounded-2xl text-xs transition shadow-lg shadow-rose-500/20">
+                        Kesişmeleri Şimdi Karşılaştır
+                    </button>
+                </div>
+
+                <div id="modeRemote" class="space-y-3 hidden">
+                    <div class="p-3.5 bg-slate-950/60 border border-slate-800 rounded-2xl">
+                        <label class="block text-xs font-semibold text-slate-300 mb-1">Kendi Dosyanızı Seçin (.json)</label>
+                        <input type="file" id="fileRemote" accept=".json" class="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-white hover:file:bg-slate-700 cursor-pointer">
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 pt-1">
+                        <button onclick="createRoomRemote()" class="bg-rose-500 hover:bg-rose-600 text-white font-medium py-2.5 px-3 rounded-xl text-xs transition">Oda Aç & Kod Al</button>
+                        <div class="flex gap-1.5">
+                            <input type="text" id="remoteCodeInput" placeholder="Oda Kodu" class="w-2/3 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs focus:outline-none focus:border-rose-500 uppercase">
+                            <button onclick="joinRoomRemote()" class="w-1/3 bg-slate-800 hover:bg-slate-700 text-white font-medium py-2 rounded-xl text-xs transition">Katıl</button>
+                        </div>
+                    </div>
+                    <div id="roomAlert" class="hidden p-3 bg-slate-950 border border-rose-800/40 rounded-xl text-xs text-center text-rose-300"></div>
+                </div>
+
+                <div class="pt-2 text-center">
+                    <button onclick="startDemo()" class="text-[11px] text-slate-500 hover:text-rose-400 underline transition">
+                        ⚡ Dosya yüklemeden demo görünümü dene
+                    </button>
+                </div>
+            </div>
+
+            <div id="previewSection" class="hidden space-y-6">
+                <div class="text-center py-4 bg-slate-950 border border-slate-800 rounded-2xl">
+                    <div class="text-5xl font-black text-rose-500 mb-1" id="encounterCount">0</div>
+                    <div class="text-sm font-semibold text-slate-200">Kesişme Tespit Edildi! 🎉</div>
+                    <div class="text-xs text-slate-400 mt-1">İlk karşılaşma: <span id="firstEncounterDate" class="text-rose-400 font-bold">-</span></div>
+                </div>
+
+                <div class="relative rounded-2xl overflow-hidden border border-slate-800">
+                    <div id="mapBlur" class="h-64 w-full filter blur-md pointer-events-none"></div>
+                    <div class="absolute inset-0 bg-slate-950/75 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center">
+                        <div class="w-12 h-12 bg-rose-500/20 text-rose-400 rounded-full flex items-center justify-center text-xl mb-3 border border-rose-500/30">🔒</div>
+                        <h3 class="text-base font-bold text-white mb-1">Tüm Konumlar & Zaman Tüneli Kilitli</h3>
+                        <p class="text-xs text-slate-400 max-w-xs mb-4">Hangi mekanlarda yan yana geldiğinizi harita üzerinde sokak sokak görün.</p>
+                        <button onclick="triggerPayment()" class="w-full max-w-xs bg-rose-500 hover:bg-rose-600 text-white font-bold py-3 px-6 rounded-xl text-xs transition shadow-lg shadow-rose-500/20">
+                            Detaylı Raporu Aç (99 ₺)
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="fullReportSection" class="hidden space-y-4">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-sm font-bold text-slate-200">Kader Haritası & Karşılaşma Noktaları</h2>
+                    <span class="text-xs text-emerald-400 bg-emerald-950/50 border border-emerald-800 px-2 py-0.5 rounded-full">Ödendi ✓</span>
+                </div>
+                <div id="paidMap" class="h-72 w-full rounded-2xl border border-slate-800"></div>
+                <div id="timelineList" class="max-h-48 overflow-y-auto space-y-2 pr-2 text-xs"></div>
+            </div>
+        </div>
+
+        <script>
+            let currentRoomId = null;
+            let encountersData = [];
+
+            function switchTab(mode) {
+                const tabTog = document.getElementById('tabTogetherBtn');
+                const tabRem = document.getElementById('tabRemoteBtn');
+                const modeTog = document.getElementById('modeTogether');
+                const modeRem = document.getElementById('modeRemote');
+                if (mode === 'together') {
+                    tabTog.className = 'flex-1 py-2 rounded-xl bg-rose-500 text-white transition';
+                    tabRem.className = 'flex-1 py-2 rounded-xl text-slate-400 hover:text-white transition';
+                    modeTog.classList.remove('hidden');
+                    modeRem.classList.add('hidden');
+                } else {
+                    tabRem.className = 'flex-1 py-2 rounded-xl bg-rose-500 text-white transition';
+                    tabTog.className = 'flex-1 py-2 rounded-xl text-slate-400 hover:text-white transition';
+                    modeRem.classList.remove('hidden');
+                    modeTog.classList.add('hidden');
+                }
+            }
+
+            async function compareTogether() {
+                const f1 = document.getElementById('fileUser1').files[0];
+                const f2 = document.getElementById('fileUser2').files[0];
+                if (!f1 || !f2) return alert('Lütfen iki partnerin de JSON dosyasını seçin.');
+                const formData = new FormData();
+                formData.append('file1', f1);
+                formData.append('file2', f2);
+                const res = await fetch('/api/compare-together', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (!res.ok) return alert(data.detail || 'Bir hata oluştu.');
+                currentRoomId = data.room_id;
+                encountersData = data.encounters;
+                showPreview(data.total_encounters, encountersData[0]?.date || 'Bilinmiyor');
+            }
+
+            async function createRoomRemote() {
+                const f = document.getElementById('fileRemote').files[0];
+                if (!f) return alert('Lütfen önce bir .json dosyası seçin.');
+                const formData = new FormData();
+                formData.append('file', f);
+                const res = await fetch('/api/create-room', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (!res.ok) return alert(data.detail || 'Hata oluştu.');
+                currentRoomId = data.room_id;
+                const alertBox = document.getElementById('roomAlert');
+                alertBox.classList.remove('hidden');
+                alertBox.innerHTML = `Oda Kodunuz: <b class="text-white select-all text-sm">${data.room_id}</b><br><span class="text-slate-400 text-[11px]">Partneriniz bu kodu girip kendi dosyasını yüklemeli.</span>`;
+            }
+
+            async function joinRoomRemote() {
+                const code = document.getElementById('remoteCodeInput').value.trim().toUpperCase();
+                const f = document.getElementById('fileRemote').files[0];
+                if (!code || !f) return alert('Hem oda kodunu girin hem de dosyanızı seçin.');
+                const formData = new FormData();
+                formData.append('file', f);
+                const res = await fetch(`/api/join-room/${code}`, { method: 'POST', body: formData });
+                const data = await res.json();
+                if (!res.ok) return alert(data.detail || 'Bir hata oluştu.');
+                currentRoomId = code;
+                encountersData = data.encounters;
+                showPreview(data.total_encounters, encountersData[0]?.date || 'Bilinmiyor');
+            }
+
+            async function startDemo() {
+                const res = await fetch('/api/demo-room', { method: 'POST' });
+                const data = await res.json();
+                currentRoomId = data.room_id;
+                encountersData = data.encounters;
+                showPreview(data.total_encounters, encountersData[0]?.date);
+            }
+
+            function showPreview(count, firstDate) {
+                document.getElementById('uploadSection').classList.add('hidden');
+                document.getElementById('previewSection').classList.remove('hidden');
+                document.getElementById('encounterCount').innerText = count;
+                document.getElementById('firstEncounterDate').innerText = firstDate;
+                setTimeout(() => {
+                    const blurMap = L.map('mapBlur', { zoomControl: false, attributionControl: false }).setView([41.0082, 28.9784], 12);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(blurMap);
+                }, 200);
+            }
+
+            async function triggerPayment() {
+                const res = await fetch(`/api/pay-room/${currentRoomId}`, { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    document.getElementById('previewSection').classList.add('hidden');
+                    document.getElementById('fullReportSection').classList.remove('hidden');
+                    renderPaidMap(encountersData);
+                }
+            }
+
+            function renderPaidMap(points) {
+                setTimeout(() => {
+                    const first = points[0] || { lat: 41.0082, lon: 28.9784 };
+                    const mapInstance = L.map('paidMap').setView([first.lat, first.lon], 13);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapInstance);
+                    const timeline = document.getElementById('timelineList');
+                    timeline.innerHTML = '';
+                    points.forEach((p, index) => {
+                        L.marker([p.lat, p.lon]).addTo(mapInstance).bindPopup(`<b>Kesişme #${index + 1}</b><br>${p.date}<br>Mesafe: ${p.distance_m}m`);
+                        const item = document.createElement('div');
+                        item.className = 'p-3 bg-slate-950 border border-slate-800 rounded-xl flex justify-between items-center';
+                        item.innerHTML = `<div><div class="font-bold text-slate-200">#${index + 1} Karşılaşma</div><div class="text-[11px] text-slate-500">${p.date}</div></div><span class="text-rose-400 font-semibold text-[11px]">~${p.distance_m}m</span>`;
+                        timeline.appendChild(item);
+                    });
+                }, 200);
+            }
+        </script>
+    </body>
+    </html>
+    """
+
+
+@app.post("/api/compare-together")
+async def compare_together(
+    file1: UploadFile = File(...), file2: UploadFile = File(...)
+):
+  p1 = parse_takeout(await file1.read())
+  p2 = parse_takeout(await file2.read())
+  encounters = calculate_matches(p1, p2)
+  room_id = str(uuid.uuid4())[:6].upper()
+  ROOMS[room_id] = {"encounters": encounters, "is_paid": False}
+  return {
+      "room_id": room_id,
+      "total_encounters": len(encounters),
+      "encounters": encounters,
+  }
+
+
+@app.post("/api/create-room")
+async def create_room(file: UploadFile):
+  content = await file.read()
+  user_points = parse_takeout(content)
+  room_id = str(uuid.uuid4())[:6].upper()
+  ROOMS[room_id] = {"points": user_points}
+  return {"room_id": room_id}
+
+
+@app.post("/api/join-room/{room_id}")
+async def join_room(room_id: str, file: UploadFile):
+  room_id = room_id.upper()
+  if room_id not in ROOMS:
+    raise HTTPException(
+        status_code=404, detail="Oda bulunamadı veya süresi doldu."
+    )
+  room = ROOMS[room_id]
+  content = await file.read()
+  user2_points = parse_takeout(content)
+  encounters = calculate_matches(room["points"], user2_points)
+  ROOMS[room_id] = {"encounters": encounters, "is_paid": False}
+  return {"total_encounters": len(encounters), "encounters": encounters}
+
+
+@app.post("/api/demo-room")
+async def demo_room():
+  base_time = datetime.now()
+  demo_encounters = [
+      {
+          "date": (base_time - timedelta(days=120, hours=3)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 40.9912,
+          "lon": 29.0256,
+          "distance_m": 42.5,
+      },
+      {
+          "date": (base_time - timedelta(days=95, hours=5)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 41.0422,
+          "lon": 29.0067,
+          "distance_m": 18.0,
+      },
+      {
+          "date": (base_time - timedelta(days=60, hours=1)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 41.0369,
+          "lon": 28.9850,
+          "distance_m": 85.2,
+      },
+      {
+          "date": (base_time - timedelta(days=40, hours=8)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 40.9835,
+          "lon": 29.0278,
+          "distance_m": 12.4,
+      },
+      {
+          "date": (base_time - timedelta(days=14, hours=2)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 41.0411,
+          "lon": 29.0090,
+          "distance_m": 55.0,
+      },
+  ]
+  room_id = "DEMO99"
+  ROOMS[room_id] = {"encounters": demo_encounters, "is_paid": False}
+  return {
+      "room_id": room_id,
+      "total_encounters": len(demo_encounters),
+      "encounters": demo_encounters,
+  }
+
+
+@app.post("/api/pay-room/{room_id}")
+async def pay_room(room_id: str):
+  return {"status": "success"}
+from datetime import datetime, timedelta
+import json
+import math
+import uuid
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+
+app = FastAPI(title="Kesişen Yollar API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+ROOMS = {}
+
+
+def haversine_distance(coord1, coord2):
+  r = 6371000
+  lat1, lon1 = map(math.radians, coord1)
+  lat2, lon2 = map(math.radians, coord2)
+  dlat = lat2 - lat1
+  dlon = lon2 - lon1
+  a = (
+      math.sin(dlat / 2) ** 2
+      + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+  )
+  return r * (2 * math.asin(math.sqrt(a)))
+
+
+def parse_takeout(content_bytes):
+  try:
+    data = json.loads(content_bytes.decode("utf-8"))
+  except Exception:
+    raise HTTPException(status_code=400, detail="Geçersiz JSON dosyası.")
+
+  locations = data.get("locations", [])
+  if not locations and isinstance(data, list):
+    locations = data
+
+  parsed = []
+  for loc in locations:
+    timestamp_str = loc.get("timestamp") or loc.get("time")
+    lat = loc.get("latitudeE7")
+    lon = loc.get("longitudeE7")
+
+    if lat is not None and lon is not None:
+      lat_deg = lat / 1e7
+      lon_deg = lon / 1e7
+    elif "latitude" in loc and "longitude" in loc:
+      lat_deg = loc["latitude"]
+      lon_deg = loc["longitude"]
+    else:
+      continue
+
+    if timestamp_str:
+      try:
+        ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        parsed.append({"timestamp": ts, "lat": lat_deg, "lon": lon_deg})
+      except Exception:
+        continue
+
+  parsed.sort(key=lambda x: x["timestamp"])
+  return parsed
+
+
+def calculate_matches(points_a, points_b, max_dist=200, max_time_sec=1800):
+  encounters = []
+  i, j = 0, 0
+  len_a, len_b = len(points_a), len(points_b)
+
+  while i < len_a and j < len_b:
+    t_a = points_a[i]["timestamp"]
+    t_b = points_b[j]["timestamp"]
+    diff = (t_a - t_b).total_seconds()
+
+    if abs(diff) <= max_time_sec:
+      dist = haversine_distance(
+          (points_a[i]["lat"], points_a[i]["lon"]),
+          (points_b[j]["lat"], points_b[j]["lon"]),
+      )
+      if dist <= max_dist:
+        encounters.append({
+            "date": t_a.strftime("%d.%m.%Y %H:%M"),
+            "lat": round((points_a[i]["lat"] + points_b[j]["lat"]) / 2, 6),
+            "lon": round((points_a[i]["lon"] + points_b[j]["lon"]) / 2, 6),
+            "distance_m": round(dist, 1),
+        })
+
+    if t_a < t_b:
+      i += 1
+    else:
+      j += 1
+
+  return encounters
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_home():
+  return """
+    <!DOCTYPE html>
+    <html lang="tr">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Kesişen Yollar | Kaderinizi Keşfedin</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    </head>
+    <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col items-center justify-center p-4 selection:bg-rose-500 selection:text-white">
+        
+        <div class="max-w-xl w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 md:p-8 shadow-2xl relative">
+            
+            <!-- Başlık -->
+            <div class="text-center mb-6">
+                <span class="inline-block px-3 py-1 bg-rose-500/10 text-rose-400 text-xs font-semibold rounded-full border border-rose-500/20 mb-3">İlişki & Kader Analizi</span>
+                <h1 class="text-3xl font-extrabold tracking-tight text-white">Yollarınız Kaç Kez Kesişti?</h1>
+                <p class="text-slate-400 text-xs mt-2 max-w-md mx-auto">Tanışmadan önce aynı mekanda, aynı dakikalarda bulunmuş muydunuz? Konum geçmişinizi karşılaştırın.</p>
+                <div class="mt-3 inline-flex items-center gap-1.5 text-[11px] text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-3 py-1 rounded-full">
+                    <span>🛡️</span> <span>Sıfır Saklama: Ham verileriniz analiz bittiği an sunucudan kalıcı olarak silinir.</span>
+                </div>
+            </div>
+
+            <!-- Adım 1: Yükleme Seçenekleri -->
+            <div id="uploadSection" class="space-y-5">
+                <div class="flex bg-slate-950 p-1 rounded-2xl border border-slate-800 text-xs font-semibold">
+                    <button id="tabTogetherBtn" onclick="switchTab('together')" class="flex-1 py-2 rounded-xl bg-rose-500 text-white transition">Yan Yana (Tek Cihaz)</button>
+                    <button id="tabRemoteBtn" onclick="switchTab('remote')" class="flex-1 py-2 rounded-xl text-slate-400 hover:text-white transition">Uzaktan (Link ile)</button>
+                </div>
+
+                <div id="modeTogether" class="space-y-3">
+                    <div class="p-3.5 bg-slate-950/60 border border-slate-800 rounded-2xl">
+                        <label class="block text-xs font-semibold text-rose-400 mb-1">1. Partnerin Dosyası (.json)</label>
+                        <input type="file" id="fileUser1" accept=".json" class="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-rose-400 hover:file:bg-slate-700 cursor-pointer">
+                    </div>
+                    <div class="p-3.5 bg-slate-950/60 border border-slate-800 rounded-2xl">
+                        <label class="block text-xs font-semibold text-rose-400 mb-1">2. Partnerin Dosyası (.json)</label>
+                        <input type="file" id="fileUser2" accept=".json" class="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-rose-400 hover:file:bg-slate-700 cursor-pointer">
+                    </div>
+                    <button onclick="compareTogether()" class="w-full bg-rose-500 hover:bg-rose-600 text-white font-bold py-3 rounded-2xl text-xs transition shadow-lg shadow-rose-500/20">
+                        Kesişmeleri Şimdi Karşılaştır
+                    </button>
+                </div>
+
+                <div id="modeRemote" class="space-y-3 hidden">
+                    <div class="p-3.5 bg-slate-950/60 border border-slate-800 rounded-2xl">
+                        <label class="block text-xs font-semibold text-slate-300 mb-1">Kendi Dosyanızı Seçin (.json)</label>
+                        <input type="file" id="fileRemote" accept=".json" class="w-full text-xs text-slate-400 file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-800 file:text-white hover:file:bg-slate-700 cursor-pointer">
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 pt-1">
+                        <button onclick="createRoomRemote()" class="bg-rose-500 hover:bg-rose-600 text-white font-medium py-2.5 px-3 rounded-xl text-xs transition">Oda Aç & Kod Al</button>
+                        <div class="flex gap-1.5">
+                            <input type="text" id="remoteCodeInput" placeholder="Oda Kodu" class="w-2/3 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs focus:outline-none focus:border-rose-500 uppercase">
+                            <button onclick="joinRoomRemote()" class="w-1/3 bg-slate-800 hover:bg-slate-700 text-white font-medium py-2 rounded-xl text-xs transition">Katıl</button>
+                        </div>
+                    </div>
+                    <div id="roomAlert" class="hidden p-3 bg-slate-950 border border-rose-800/40 rounded-xl text-xs text-center text-rose-300"></div>
+                </div>
+
+                <!-- Google Takeout Rehberi Linki -->
+                <div class="text-center pt-2">
+                    <details class="text-[11px] text-slate-400 cursor-pointer">
+                        <summary class="hover:text-rose-400">❓ Google Konum Dosyası (Takeout) Nasıl İndirilir?</summary>
+                        <div class="mt-3 p-3 bg-slate-950 rounded-xl border border-slate-800 text-left space-y-1.5 text-slate-300">
+                            <div>1. <b>takeout.google.com</b> adresine gidin.</div>
+                            <div>2. Tüm seçimleri kaldırıp yalnızca <b>Konum Geçmişi (Zaman Çizelgesi)</b>'ni seçin.</div>
+                            <div>3. Formatı <b>JSON</b> seçip dışa aktarımı başlatın. İnen zip içindeki <i>Records.json</i> dosyasını buraya yükleyin.</div>
+                        </div>
+                    </details>
+                </div>
+
+                <div class="pt-2 text-center">
+                    <button onclick="startDemo()" class="text-[11px] text-slate-500 hover:text-rose-400 underline transition">
+                        ⚡ Dosya yüklemeden örnek demoyu çalıştır
+                    </button>
+                </div>
+            </div>
+
+            <!-- Adım 2: Kilitli Önizleme Ekranı -->
+            <div id="previewSection" class="hidden space-y-6">
+                <div class="text-center py-4 bg-slate-950 border border-slate-800 rounded-2xl">
+                    <div class="text-5xl font-black text-rose-500 mb-1" id="encounterCount">0</div>
+                    <div class="text-sm font-semibold text-slate-200">Kesişme Tespit Edildi! 🎉</div>
+                    <div class="text-xs text-slate-400 mt-1">İlk karşılaşma: <span id="firstEncounterDate" class="text-rose-400 font-bold">-</span></div>
+                </div>
+
+                <div class="relative rounded-2xl overflow-hidden border border-slate-800">
+                    <div id="mapBlur" class="h-64 w-full filter blur-md pointer-events-none"></div>
+                    <div class="absolute inset-0 bg-slate-950/75 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center">
+                        <div class="w-12 h-12 bg-rose-500/20 text-rose-400 rounded-full flex items-center justify-center text-xl mb-3 border border-rose-500/30">🔒</div>
+                        <h3 class="text-base font-bold text-white mb-1">Tüm Konumlar & Zaman Tüneli Kilitli</h3>
+                        <p class="text-xs text-slate-400 max-w-xs mb-4">Hangi mekanlarda yan yana geldiğinizi harita üzerinde sokak sokak görün.</p>
+                        <button onclick="triggerPayment()" class="w-full max-w-xs bg-rose-500 hover:bg-rose-600 text-white font-bold py-3 px-6 rounded-xl text-xs transition shadow-lg shadow-rose-500/20">
+                            Detaylı Raporu Aç (99 ₺)
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Adım 3: Açık Rapor Ekranı -->
+            <div id="fullReportSection" class="hidden space-y-4">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-sm font-bold text-slate-200">Kader Haritası & Karşılaşma Noktaları</h2>
+                    <span class="text-xs text-emerald-400 bg-emerald-950/50 border border-emerald-800 px-2 py-0.5 rounded-full">Ödendi ✓</span>
+                </div>
+                
+                <div id="paidMap" class="h-64 w-full rounded-2xl border border-slate-800"></div>
+
+                <!-- Story İndirme Butonu -->
+                <button onclick="generateStoryCard()" class="w-full bg-gradient-to-r from-rose-500 to-purple-600 hover:opacity-90 text-white font-bold py-3 px-4 rounded-xl text-xs transition flex items-center justify-center gap-2 shadow-lg">
+                    <span>📸</span> <span>Instagram Story Kartını İndir</span>
+                </button>
+
+                <div id="timelineList" class="max-h-40 overflow-y-auto space-y-2 pr-2 text-xs"></div>
+            </div>
+
+            <canvas id="storyCanvas" width="1080" height="1920" class="hidden"></canvas>
+        </div>
+
+        <script>
+            let currentRoomId = null;
+            let encountersData = [];
+
+            function switchTab(mode) {
+                const tabTog = document.getElementById('tabTogetherBtn');
+                const tabRem = document.getElementById('tabRemoteBtn');
+                const modeTog = document.getElementById('modeTogether');
+                const modeRem = document.getElementById('modeRemote');
+                if (mode === 'together') {
+                    tabTog.className = 'flex-1 py-2 rounded-xl bg-rose-500 text-white transition';
+                    tabRem.className = 'flex-1 py-2 rounded-xl text-slate-400 hover:text-white transition';
+                    modeTog.classList.remove('hidden');
+                    modeRem.classList.add('hidden');
+                } else {
+                    tabRem.className = 'flex-1 py-2 rounded-xl bg-rose-500 text-white transition';
+                    tabTog.className = 'flex-1 py-2 rounded-xl text-slate-400 hover:text-white transition';
+                    modeRem.classList.remove('hidden');
+                    modeTog.classList.add('hidden');
+                }
+            }
+
+            async function compareTogether() {
+                const f1 = document.getElementById('fileUser1').files[0];
+                const f2 = document.getElementById('fileUser2').files[0];
+                if (!f1 || !f2) return alert('Lütfen iki partnerin de JSON dosyasını seçin.');
+                const formData = new FormData();
+                formData.append('file1', f1);
+                formData.append('file2', f2);
+                const res = await fetch('/api/compare-together', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (!res.ok) return alert(data.detail || 'Bir hata oluştu.');
+                currentRoomId = data.room_id;
+                encountersData = data.encounters;
+                showPreview(data.total_encounters, encountersData[0]?.date || 'Bilinmiyor');
+            }
+
+            async function createRoomRemote() {
+                const f = document.getElementById('fileRemote').files[0];
+                if (!f) return alert('Lütfen önce bir .json dosyası seçin.');
+                const formData = new FormData();
+                formData.append('file', f);
+                const res = await fetch('/api/create-room', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (!res.ok) return alert(data.detail || 'Hata oluştu.');
+                currentRoomId = data.room_id;
+                const alertBox = document.getElementById('roomAlert');
+                alertBox.classList.remove('hidden');
+                alertBox.innerHTML = `Oda Kodunuz: <b class="text-white select-all text-sm">${data.room_id}</b><br><span class="text-slate-400 text-[11px]">Partneriniz bu kodu girip kendi dosyasını yüklemeli.</span>`;
+            }
+
+            async function joinRoomRemote() {
+                const code = document.getElementById('remoteCodeInput').value.trim().toUpperCase();
+                const f = document.getElementById('fileRemote').files[0];
+                if (!code || !f) return alert('Hem oda kodunu girin hem de dosyanızı seçin.');
+                const formData = new FormData();
+                formData.append('file', f);
+                const res = await fetch(`/api/join-room/${code}`, { method: 'POST', body: formData });
+                const data = await res.json();
+                if (!res.ok) return alert(data.detail || 'Bir hata oluştu.');
+                currentRoomId = code;
+                encountersData = data.encounters;
+                showPreview(data.total_encounters, encountersData[0]?.date || 'Bilinmiyor');
+            }
+
+            async function startDemo() {
+                const res = await fetch('/api/demo-room', { method: 'POST' });
+                const data = await res.json();
+                currentRoomId = data.room_id;
+                encountersData = data.encounters;
+                showPreview(data.total_encounters, encountersData[0]?.date);
+            }
+
+            function showPreview(count, firstDate) {
+                document.getElementById('uploadSection').classList.add('hidden');
+                document.getElementById('previewSection').classList.remove('hidden');
+                document.getElementById('encounterCount').innerText = count;
+                document.getElementById('firstEncounterDate').innerText = firstDate;
+                setTimeout(() => {
+                    const blurMap = L.map('mapBlur', { zoomControl: false, attributionControl: false }).setView([41.0082, 28.9784], 12);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(blurMap);
+                }, 200);
+            }
+
+            async function triggerPayment() {
+                const res = await fetch(`/api/pay-room/${currentRoomId}`, { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    document.getElementById('previewSection').classList.add('hidden');
+                    document.getElementById('fullReportSection').classList.remove('hidden');
+                    renderPaidMap(encountersData);
+                }
+            }
+
+            function renderPaidMap(points) {
+                setTimeout(() => {
+                    const first = points[0] || { lat: 41.0082, lon: 28.9784 };
+                    const mapInstance = L.map('paidMap').setView([first.lat, first.lon], 13);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapInstance);
+                    const timeline = document.getElementById('timelineList');
+                    timeline.innerHTML = '';
+                    points.forEach((p, index) => {
+                        L.marker([p.lat, p.lon]).addTo(mapInstance).bindPopup(`<b>Kesişme #${index + 1}</b><br>${p.date}<br>Mesafe: ${p.distance_m}m`);
+                        const item = document.createElement('div');
+                        item.className = 'p-3 bg-slate-950 border border-slate-800 rounded-xl flex justify-between items-center';
+                        item.innerHTML = `<div><div class="font-bold text-slate-200">#${index + 1} Karşılaşma</div><div class="text-[11px] text-slate-500">${p.date}</div></div><span class="text-rose-400 font-semibold text-[11px]">~${p.distance_m}m</span>`;
+                        timeline.appendChild(item);
+                    });
+                }, 200);
+            }
+
+            function generateStoryCard() {
+                const canvas = document.getElementById('storyCanvas');
+                const ctx = canvas.getContext('2d');
+
+                // Arka plan gradyanı
+                const grad = ctx.createLinearGradient(0, 0, 0, 1920);
+                grad.addColorStop(0, '#090d16');
+                grad.addColorStop(0.5, '#1e112a');
+                grad.addColorStop(1, '#090d16');
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, 1080, 1920);
+
+                // Kart çerçevesi
+                ctx.strokeStyle = 'rgba(244, 63, 94, 0.3)';
+                ctx.lineWidth = 4;
+                ctx.strokeRect(60, 60, 960, 1800);
+
+                // Başlık
+                ctx.fillStyle = '#f43f5e';
+                ctx.font = 'bold 50px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('✨ KESİŞEN YOLLAR RAPORU', 540, 400);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 70px sans-serif';
+                ctx.fillText('Tanışmadan Önce', 540, 520);
+                ctx.fillText('Yollarımız Kesişmiş!', 540, 610);
+
+                // Kesişme Sayısı
+                ctx.fillStyle = '#f43f5e';
+                ctx.font = '900 220px sans-serif';
+                ctx.fillText(encountersData.length.toString(), 540, 900);
+
+                ctx.fillStyle = '#cbd5e1';
+                ctx.font = '500 55px sans-serif';
+                ctx.fillText('Kez Aynı Yerdeydik', 540, 1000);
+
+                // İlk Karşılaşma Kutusu
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+                ctx.roundRect(160, 1150, 760, 220, [30]);
+                ctx.fill();
+
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '40px sans-serif';
+                ctx.fillText('İlk Karşılaşma Tarihi', 540, 1230);
+
+                ctx.fillStyle = '#fb7185';
+                ctx.font = 'bold 55px sans-serif';
+                ctx.fillText(encountersData[0]?.date || '-', 540, 1310);
+
+                // Footer / Link
+                ctx.fillStyle = '#64748b';
+                ctx.font = '36px sans-serif';
+                ctx.fillText('Sen de sevgilinle test et:', 540, 1680);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 44px sans-serif';
+                ctx.fillText('kesisenyollar.com', 540, 1740);
+
+                // İndirme tetikle
+                const link = document.createElement('a');
+                link.download = 'kader-raporumuz.png';
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+            }
+        </script>
+    </body>
+    </html>
+    """
+
+
+@app.post("/api/compare-together")
+async def compare_together(
+    file1: UploadFile = File(...), file2: UploadFile = File(...)
+):
+  p1 = parse_takeout(await file1.read())
+  p2 = parse_takeout(await file2.read())
+  encounters = calculate_matches(p1, p2)
+  room_id = str(uuid.uuid4())[:6].upper()
+  ROOMS[room_id] = {"encounters": encounters, "is_paid": False}
+  return {
+      "room_id": room_id,
+      "total_encounters": len(encounters),
+      "encounters": encounters,
+  }
+
+
+@app.post("/api/create-room")
+async def create_room(file: UploadFile):
+  content = await file.read()
+  user_points = parse_takeout(content)
+  room_id = str(uuid.uuid4())[:6].upper()
+  ROOMS[room_id] = {"points": user_points}
+  return {"room_id": room_id}
+
+
+@app.post("/api/join-room/{room_id}")
+async def join_room(room_id: str, file: UploadFile):
+  room_id = room_id.upper()
+  if room_id not in ROOMS:
+    raise HTTPException(
+        status_code=404, detail="Oda bulunamadı veya süresi doldu."
+    )
+  room = ROOMS[room_id]
+  content = await file.read()
+  user2_points = parse_takeout(content)
+  encounters = calculate_matches(room["points"], user2_points)
+  ROOMS[room_id] = {"encounters": encounters, "is_paid": False}
+  return {"total_encounters": len(encounters), "encounters": encounters}
+
+
+@app.post("/api/demo-room")
+async def demo_room():
+  base_time = datetime.now()
+  demo_encounters = [
+      {
+          "date": (base_time - timedelta(days=120, hours=3)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 40.9912,
+          "lon": 29.0256,
+          "distance_m": 42.5,
+      },
+      {
+          "date": (base_time - timedelta(days=95, hours=5)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 41.0422,
+          "lon": 29.0067,
+          "distance_m": 18.0,
+      },
+      {
+          "date": (base_time - timedelta(days=60, hours=1)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 41.0369,
+          "lon": 28.9850,
+          "distance_m": 85.2,
+      },
+      {
+          "date": (base_time - timedelta(days=40, hours=8)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 40.9835,
+          "lon": 29.0278,
+          "distance_m": 12.4,
+      },
+      {
+          "date": (base_time - timedelta(days=14, hours=2)).strftime(
+              "%d.%m.%Y %H:%M"
+          ),
+          "lat": 41.0411,
+          "lon": 29.0090,
+          "distance_m": 55.0,
+      },
+  ]
+  room_id = "DEMO99"
+  ROOMS[room_id] = {"encounters": demo_encounters, "is_paid": False}
+  return {
+      "room_id": room_id,
+      "total_encounters": len(demo_encounters),
+      "encounters": demo_encounters,
+  }
+
+
+@app.post("/api/pay-room/{room_id}")
+async def pay_room(room_id: str):
+  return {"status": "success"}
+return {"status": "success"}
+
