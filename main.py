@@ -292,6 +292,7 @@ async def index():
                     localStorage.setItem('kesisen_odeme_yapildi', 'true');
                 }
                 
+                // Shopier yönlendirme linkini dinamik olarak ayarla
                 const currentBaseUrl = window.location.origin + window.location.pathname;
                 const shopierUrl = `https://www.shopier.com/kuyum/51088401?return_url=${encodeURIComponent(currentBaseUrl + '?odeme=basarili')}`;
                 const sBtn = document.getElementById('shopierBtn');
@@ -328,6 +329,7 @@ async def index():
                         summaryDiv.innerHTML = summaryHtml;
                         
                         if(data.match_count > 0) {
+                            // Ödemenin daha önce yapılıp yapılmadığını kontrol et
                             const isPaid = localStorage.getItem('kesisen_odeme_yapildi') === 'true';
                             
                             if (isPaid) {
