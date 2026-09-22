@@ -211,25 +211,33 @@ async def index():
                 <h3 class="text-lg font-bold text-white">Raporu ve Hikaye Kartını Aç</h3>
                 <p class="text-xs text-slate-300 max-w-md mx-auto">Tüm ortak kesişim noktalarınızı ve özel Instagram hikaye kartınızı görüntülemek için kilit ekranındasınız.</p>
                 
-                <!-- Kullanım Rehberi / Bilgilendirme Kutusu -->
+                <!-- Kullanım Rehberi -->
                 <div class="bg-slate-950/60 p-3 rounded-xl border border-pink-500/30 text-left space-y-1.5 text-[11px] text-slate-200">
                     <div class="font-bold text-pink-400 mb-1">📌 Nasıl Açılır?</div>
-                    <div>1️⃣ Aşağıdaki **100 TL** güvenli ödeme butonuna tıkla.</div>
-                    <div>2️⃣ Shopier üzerinden ödemeyi güvenle tamamla.</div>
-                    <div>3️⃣ Ödeme sonrasında sitemize otomatik dönerek **raporun ve hikaye kartın anında kilitler kalkmış şekilde açılsın!**</div>
+                    <div>1️⃣ Aşağıdaki **100 TL** güvenli ödeme butonuna tıkla ve ödemeyi tamamla.</div>
+                    <div>2️⃣ Ödeme sonrasında sana verilen **Sipariş Numarasını** aşağıya yaz ve **"Sipariş No ile Aç"** butonuna bas!</div>
                 </div>
 
-                <a id="shopierBtn" href="https://www.shopier.com/kuyum/51088401" target="_blank" class="inline-flex items-center justify-center gap-2 px-8 py-3.5 bg-gradient-to-r from-pink-500 to-purple-600 hover:opacity-90 text-white rounded-xl font-bold text-sm shadow-lg transition transform hover:scale-105">
+                <a id="shopierBtn" href="https://www.shopier.com/kuyum/51088401" target="_blank" class="inline-flex items-center justify-center gap-2 px-8 py-3 bg-gradient-to-r from-pink-500 to-purple-600 hover:opacity-90 text-white rounded-xl font-bold text-xs shadow-lg transition transform hover:scale-105">
                     <span>💳 Güvenli Ödeme Yap (100 TL)</span>
                 </a>
-                <p class="text-[10px] text-slate-400">Ödemeden sonra bu sayfaya geri döndüğünüzde kilit otomatik açılacaktır.</p>
+
+                <!-- Sipariş Numarası Giriş Alanı -->
+                <div class="pt-2 border-t border-pink-500/20 space-y-2">
+                    <label class="block text-[11px] text-pink-300 font-semibold">Shopier Sipariş Numaranızı Girin:</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="orderNumberInput" placeholder="Örn: 849201" class="flex-1 px-3 py-2 bg-slate-900 border border-pink-500/40 rounded-xl text-xs text-white focus:outline-none focus:border-pink-500 text-center font-bold tracking-wider"/>
+                        <button type="button" id="verifyOrderBtn" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs transition shadow">Sipariş No ile Aç 🔓</button>
+                    </div>
+                    <div id="orderError" class="text-[10px] text-rose-400 hidden">Lütfen geçerli bir sipariş numarası girin!</div>
+                </div>
             </div>
 
             <!-- Kilitli İçerikler (Ödeme Yapılmadan Önce Gizli) -->
             <div id="lockedContent" class="mt-6 hidden space-y-6">
                 <!-- PDF İndirme ve Detaylar -->
                 <div class="flex justify-between items-center bg-slate-900 p-3 rounded-xl border border-slate-700">
-                    <span class="text-xs text-emerald-400 font-bold">✅ Ödeme Onaylandı & Kilit Açıldı!</span>
+                    <span class="text-xs text-emerald-400 font-bold">✅ Sipariş Onaylandı & Kilit Açıldı!</span>
                     <button type="button" id="downloadPdfBtn" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-xl font-bold text-xs transition border border-slate-600 text-white">PDF Raporu İndir 📄</button>
                 </div>
 
@@ -287,16 +295,26 @@ async def index():
             let lastMeta = {};
 
             window.addEventListener('DOMContentLoaded', () => {
-                const urlParams = new URLSearchParams(window.location.search);
-                if (urlParams.get('odeme') === 'basarili' || urlParams.get('status') === 'success') {
-                    localStorage.setItem('kesisen_odeme_yapildi', 'true');
-                }
-                
-                // Shopier yönlendirme linkini dinamik olarak ayarla
-                const currentBaseUrl = window.location.origin + window.location.pathname;
-                const shopierUrl = `https://www.shopier.com/kuyum/51088401?return_url=${encodeURIComponent(currentBaseUrl + '?odeme=basarili')}`;
-                const sBtn = document.getElementById('shopierBtn');
-                if(sBtn) sBtn.href = shopierUrl;
+                // Sipariş numarası doğrulama butonu
+                document.getElementById('verifyOrderBtn').onclick = () => {
+                    const orderNo = document.getElementById('orderNumberInput').value.trim();
+                    const errDiv = document.getElementById('orderError');
+                    
+                    // Sipariş numarasının boş olmadığını ve en az 3-4 karakter olduğunu kontrol et
+                    if (orderNo && orderNo.length >= 3) {
+                        localStorage.setItem('kesisen_odeme_yapildi', 'true');
+                        localStorage.setItem('kesisen_siparis_no', orderNo);
+                        errDiv.classList.add('hidden');
+                        
+                        if (currentMatches.length > 0) {
+                            renderUnlockedContent({ matches: currentMatches, match_count: currentMatches.length });
+                        } else {
+                            alert('Sipariş numaranız kaydedildi! Lütfen analiz için dosyalarınızı yükleyin.');
+                        }
+                    } else {
+                        errDiv.classList.remove('hidden');
+                    }
+                };
             });
 
             document.getElementById('uploadForm').onsubmit = async (e) => {
@@ -329,7 +347,6 @@ async def index():
                         summaryDiv.innerHTML = summaryHtml;
                         
                         if(data.match_count > 0) {
-                            // Ödemenin daha önce yapılıp yapılmadığını kontrol et
                             const isPaid = localStorage.getItem('kesisen_odeme_yapildi') === 'true';
                             
                             if (isPaid) {
