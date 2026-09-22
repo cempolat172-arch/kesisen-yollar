@@ -165,6 +165,7 @@ async def index():
         <meta charset="UTF-8">
         <title>Kesişen Yollar</title>
         <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
         <style>
             @media print {
                 body { background: white !important; color: black !important; }
@@ -262,7 +263,7 @@ async def index():
                             <div class="text-[10px] text-pink-200 mt-1 italic" id="storyDesc">"Birbirimizden habersiz aynı yerlerden geçmişiz..."</div>
                         </div>
                         
-                        <button id="shareStoryBtn" class="mt-4 w-full py-2.5 bg-gradient-to-r from-purple-600 to-pink-600 hover:opacity-90 text-white rounded-xl font-bold text-xs shadow-lg transition flex items-center justify-center gap-2"><span>Hikaye Görselini İndir / Paylaş 🚀</span></button>
+                        <button id="shareStoryBtn" type="button" class="mt-4 w-full py-2.5 bg-gradient-to-r from-purple-600 to-pink-600 hover:opacity-90 text-white rounded-xl font-bold text-xs shadow-lg transition flex items-center justify-center gap-2 cursor-pointer"><span>Hikaye Görselini İndir / Paylaş 🚀</span></button>
                         <div class="relative z-10 flex justify-between items-center text-[9px] text-slate-400 px-1 border-t border-white/10 pt-2">
                             <span class="font-bold text-pink-400">#KesişenYollar</span>
                             <span>Google Takeout AI</span>
@@ -300,7 +301,6 @@ async def index():
                     const orderNo = document.getElementById('orderNumberInput').value.trim();
                     const errDiv = document.getElementById('orderError');
                     
-                    // Sipariş numarasının boş olmadığını ve en az 3-4 karakter olduğunu kontrol et
                     if (orderNo && orderNo.length >= 3) {
                         localStorage.setItem('kesisen_odeme_yapildi', 'true');
                         localStorage.setItem('kesisen_siparis_no', orderNo);
@@ -313,6 +313,28 @@ async def index():
                         }
                     } else {
                         errDiv.classList.remove('hidden');
+                    }
+                };
+
+                // Hikaye Görselini İndirme Butonu
+                document.getElementById('shareStoryBtn').onclick = async () => {
+                    const btn = document.getElementById('shareStoryBtn');
+                    btn.innerText = "Görsel Hazırlanıyor... ⏳";
+                    
+                    try {
+                        const storyCard = document.querySelector('#storySection .w-72');
+                        const canvas = await html2canvas(storyCard, { scale: 2, useCORS: true, backgroundColor: null });
+                        
+                        const image = canvas.toDataURL('image/png');
+                        const a = document.createElement('a');
+                        a.href = image;
+                        a.download = 'kesisen-yollar-hikaye.png';
+                        a.click();
+                        
+                        btn.innerText = "Hikaye Görselini İndir / Paylaş 🚀";
+                    } catch (err) {
+                        alert('Görsel indirilirken bir hata oluştu. Ekran görüntüsü alarak paylaşabilirsiniz!');
+                        btn.innerText = "Hikaye Görselini İndir / Paylaş 🚀";
                     }
                 };
             });
