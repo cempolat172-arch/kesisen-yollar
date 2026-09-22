@@ -21,16 +21,19 @@ def format_timestamp(ts):
     try:
         tr_tz = timezone(timedelta(hours=3))
         
+        # Eğer Unix timestamp (saniye veya milisaniye) cinsindense
         if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.isdigit()):
             ts_val = float(ts)
             if ts_val <= 0:
                 return "Tarih Bulunamadı"
-            if ts_val > 1e11:  # Milisaniye cinsindense
+            if ts_val > 1e11:  # Milisaniye
                 ts_val /= 1000.0
             dt = datetime.fromtimestamp(ts_val, tz=timezone.utc).astimezone(tr_tz)
-            if dt.year < 2010:  # 2010 öncesi hatalı/varsayılan tarihleri filtrele
+            if dt.year < 2010:
                 return "Tarih Bulunamadı"
             return dt.strftime("%d.%m.%Y %H:%M")
+        
+        # Eğer ISO string formatındaysa (örn: 2023-05-14T12:30:00Z)
         elif isinstance(ts, str):
             clean_ts = ts.replace("Z", "+00:00")
             if "+" not in clean_ts and "T" in clean_ts:
@@ -63,6 +66,7 @@ def parse_takeout(file_content: str):
         if not isinstance(item, dict):
             continue
             
+        # Google Timeline Visit objeleri
         if "visit" in item and isinstance(item["visit"], dict):
             visit = item["visit"]
             place_loc = visit.get("placeLocation", {})
@@ -72,7 +76,7 @@ def parse_takeout(file_content: str):
                     try:
                         lat_lng = geo_str.replace("geo:", "").split(",")
                         if len(lat_lng) == 2:
-                            raw_time = visit.get("startTime", "Bilinmiyor")
+                            raw_time = visit.get("startTime", visit.get("duration", {}).get("startTimestamp", "Bilinmiyor"))
                             locations.append({
                                 "lat": float(lat_lng[0]),
                                 "lng": float(lat_lng[1]),
@@ -81,6 +85,7 @@ def parse_takeout(file_content: str):
                     except ValueError:
                         continue
                         
+        # Google Timeline Path objeleri
         if "timelinePath" in item and isinstance(item["timelinePath"], list):
             for path_point in item["timelinePath"]:
                 if isinstance(path_point, dict) and "point" in path_point:
@@ -89,7 +94,7 @@ def parse_takeout(file_content: str):
                         try:
                             lat_lng = geo_str.replace("geo:", "").split(",")
                             if len(lat_lng) == 2:
-                                raw_time = path_point.get("durationMinutesOffsetFromStartTime", "Bilinmiyor")
+                                raw_time = path_point.get("time", path_point.get("durationMinutesOffsetFromStartTime", "Bilinmiyor"))
                                 locations.append({
                                     "lat": float(lat_lng[0]),
                                     "lng": float(lat_lng[1]),
@@ -98,22 +103,24 @@ def parse_takeout(file_content: str):
                         except ValueError:
                             continue
                             
+        # Standart E7 koordinatları
         lat = item.get("latitudeE7")
         lng = item.get("longitudeE7")
         if lat and lng:
             locations.append({
                 "lat": lat / 1e7,
                 "lng": lng / 1e7,
-                "time": format_timestamp(item.get("timestamp", "Bilinmiyor"))
+                "time": format_timestamp(item.get("timestamp", item.get("timestampMs", "Bilinmiyor")))
             })
             
+        # Standart float koordinatları
         lat_std = item.get("latitude")
         lng_std = item.get("longitude")
         if lat_std and lng_std:
             locations.append({
                 "lat": float(lat_std),
                 "lng": float(lng_std),
-                "time": format_timestamp(item.get("timestamp", "Bilinmiyor"))
+                "time": format_timestamp(item.get("timestamp", item.get("timestampMs", "Bilinmiyor")))
             })
             
     return locations
@@ -316,7 +323,7 @@ async def index():
                     }
                 };
 
-                // Yerel Canvas ile %100 Çalışan Hikaye Kartı İndirme
+                // Yerel Canvas ile İlk Karşılaşma Detaylı Hikaye Görseli İndirme
                 document.getElementById('shareStoryBtn').onclick = () => {
                     const btn = document.getElementById('shareStoryBtn');
                     btn.innerText = "Görsel Hazırlanıyor... ⏳";
@@ -340,48 +347,55 @@ async def index():
                         ctx.strokeStyle = 'rgba(236, 72, 153, 0.4)';
                         ctx.lineWidth = 4;
                         ctx.beginPath();
-                        ctx.roundRect(290, 350, 500, 90, 45);
+                        ctx.roundRect(290, 320, 500, 90, 45);
                         ctx.fill();
                         ctx.stroke();
                         
                         ctx.fillStyle = '#f472b6';
                         ctx.font = 'bold 28px sans-serif';
                         ctx.textAlign = 'center';
-                        ctx.fillText('KADERİN CİMRİ OYUNU', 540, 408);
+                        ctx.fillText('KADERİN CİMRİ OYUNU', 540, 378);
                         
                         // Ana Başlık
                         ctx.fillStyle = '#ffffff';
                         ctx.font = 'bold 64px sans-serif';
-                        ctx.fillText('Yollarımız Hep Kesilmiş! ⚡', 540, 520);
+                        ctx.fillText('Yollarımız Hep Kesilmiş! ⚡', 540, 480);
                         
                         // Ortadaki Kutu (Card Container)
                         ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
                         ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
                         ctx.lineWidth = 4;
                         ctx.beginPath();
-                        ctx.roundRect(140, 680, 800, 560, 40);
+                        ctx.roundRect(100, 580, 880, 720, 40);
                         ctx.fill();
                         ctx.stroke();
                         
                         // Sayaç Sayısı
                         ctx.fillStyle = '#f472b6';
-                        ctx.font = 'bold 130px sans-serif';
+                        ctx.font = 'bold 120px sans-serif';
                         const countText = document.getElementById('storyCount').innerText;
-                        ctx.fillText(countText, 540, 840);
+                        ctx.fillText(countText, 540, 720);
                         
                         ctx.fillStyle = '#ffffff';
-                        ctx.font = 'bold 36px sans-serif';
-                        ctx.fillText('Ortak Noktada Buluşuldu', 540, 910);
+                        ctx.font = 'bold 34px sans-serif';
+                        ctx.fillText('Ortak Noktada Buluşuldu', 540, 790);
                         
-                        // İlk Karşılaşma Detayı
+                        // İlk Karşılaşma Detayı (Saat, Tarih ve Konum)
                         ctx.fillStyle = '#fbcfe8';
-                        ctx.font = '28px sans-serif';
-                        ctx.fillText('İlk Karşılaşma:', 540, 1020);
+                        ctx.font = 'bold 28px sans-serif';
+                        ctx.fillText('📍 İlk Karşılaşma Noktası & Zamanı', 540, 900);
                         
-                        ctx.fillStyle = '#ffffff';
-                        ctx.font = 'bold 26px sans-serif';
                         const firstDesc = document.getElementById('firstMatchDescText') ? document.getElementById('firstMatchDescText').innerText : 'Birlikte aynı yerden geçildi';
-                        ctx.fillText(firstDesc, 540, 1075);
+                        ctx.fillStyle = '#ffffff';
+                        ctx.font = '26px sans-serif';
+                        ctx.fillText(firstDesc, 540, 960);
+                        
+                        const firstCoords = document.getElementById('firstMatchCoords') ? document.getElementById('firstMatchCoords').innerText : '';
+                        if (firstCoords) {
+                            ctx.fillStyle = '#cbd5e1';
+                            ctx.font = '22px monospace';
+                            ctx.fillText(firstCoords, 540, 1015);
+                        }
                         
                         // Alt Etiket
                         ctx.fillStyle = '#f472b6';
@@ -481,7 +495,11 @@ async def index():
                 
                 if (data.matches.length > 0) {
                     const first = data.matches[0];
-                    document.getElementById('firstMatchDesc').innerHTML = `<span class="font-semibold text-white">İlk Karşılaşma:</span> <span id="firstMatchDescText">${first.time1}</span>`;
+                    document.getElementById('firstMatchDesc').innerHTML = `
+                        <span class="font-semibold text-white">İlk Karşılaşma:</span><br/>
+                        <span id="firstMatchDescText" class="text-pink-300 font-bold">P1: ${first.time1} | P2: ${first.time2}</span><br/>
+                        <span id="firstMatchCoords" class="text-[9px] font-mono text-slate-400">Koord: ${first.lat}, ${first.lng} (${first.distance_meters}m)</span>
+                    `;
                 }
             }
 
