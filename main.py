@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import json
@@ -15,13 +15,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Örnek Onaylı Shopier Sipariş Numaraları (Buraya gerçek sipariş numaralarını ekleyebilirsin)
+VALID_ORDER_NUMBERS = {"123456", "987654", "test123", "kesisen2026"}
+
 def format_timestamp(ts):
     if not ts or ts == "Bilinmiyor" or ts == 0 or ts == "0":
         return "Tarih Bulunamadı"
     try:
         tr_tz = timezone(timedelta(hours=3))
         
-        # Eğer Unix timestamp (saniye veya milisaniye) cinsindense
         if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.isdigit()):
             ts_val = float(ts)
             if ts_val <= 0:
@@ -32,8 +34,6 @@ def format_timestamp(ts):
             if dt.year < 2010:
                 return "Tarih Bulunamadı"
             return dt.strftime("%d.%m.%Y %H:%M")
-        
-        # Eğer ISO string formatındaysa (örn: 2023-05-14T12:30:00Z)
         elif isinstance(ts, str):
             clean_ts = ts.replace("Z", "+00:00")
             if "+" not in clean_ts and "T" in clean_ts:
@@ -66,7 +66,6 @@ def parse_takeout(file_content: str):
         if not isinstance(item, dict):
             continue
             
-        # Google Timeline Visit objeleri
         if "visit" in item and isinstance(item["visit"], dict):
             visit = item["visit"]
             place_loc = visit.get("placeLocation", {})
@@ -85,7 +84,6 @@ def parse_takeout(file_content: str):
                     except ValueError:
                         continue
                         
-        # Google Timeline Path objeleri
         if "timelinePath" in item and isinstance(item["timelinePath"], list):
             for path_point in item["timelinePath"]:
                 if isinstance(path_point, dict) and "point" in path_point:
@@ -103,7 +101,6 @@ def parse_takeout(file_content: str):
                         except ValueError:
                             continue
                             
-        # Standart E7 koordinatları
         lat = item.get("latitudeE7")
         lng = item.get("longitudeE7")
         if lat and lng:
@@ -113,7 +110,6 @@ def parse_takeout(file_content: str):
                 "time": format_timestamp(item.get("timestamp", item.get("timestampMs", "Bilinmiyor")))
             })
             
-        # Standart float koordinatları
         lat_std = item.get("latitude")
         lng_std = item.get("longitude")
         if lat_std and lng_std:
@@ -162,6 +158,13 @@ async def compare_together(file1: UploadFile = File(...), file2: UploadFile = Fi
         "total_locs_1": len(locs1),
         "total_locs_2": len(locs2)
     }
+
+@app.post("/api/verify-order")
+async def verify_order(data: dict = Body(...)):
+    order_no = data.get("order_number", "").strip()
+    if order_no in VALID_ORDER_NUMBERS:
+        return {"success": True, "message": "Sipariş onaylandı!"}
+    raise HTTPException(status_code=400, detail="Geçersiz veya henüz onaylanmamış sipariş numarası!")
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -212,13 +215,12 @@ async def index():
             <!-- Analiz Özet Bilgisi -->
             <div id="summaryResult" class="mt-4"></div>
 
-            <!-- Shopier Ödeme ve Kilit Alanı (Başlangıçta Gizli, Analiz Sonrası Görünür) -->
+            <!-- Shopier Ödeme ve Kilit Alanı -->
             <div id="paymentLockSection" class="mt-6 hidden p-6 bg-gradient-to-r from-purple-900/90 to-pink-900/90 border border-pink-500/60 rounded-2xl text-center space-y-4 shadow-2xl">
                 <div class="inline-flex items-center justify-center w-12 h-12 bg-pink-500/20 text-pink-400 rounded-full mb-1 text-xl">🔒</div>
                 <h3 class="text-lg font-bold text-white">Raporu ve Hikaye Kartını Aç</h3>
                 <p class="text-xs text-slate-300 max-w-md mx-auto">Tüm ortak kesişim noktalarınızı ve özel Instagram hikaye kartınızı görüntülemek için kilit ekranındasınız.</p>
                 
-                <!-- Kullanım Rehberi -->
                 <div class="bg-slate-950/60 p-3 rounded-xl border border-pink-500/30 text-left space-y-1.5 text-[11px] text-slate-200">
                     <div class="font-bold text-pink-400 mb-1">📌 Nasıl Açılır?</div>
                     <div>1️⃣ Aşağıdaki **100 TL** güvenli ödeme butonuna tıkla ve ödemeyi tamamla.</div>
@@ -229,29 +231,26 @@ async def index():
                     <span>💳 Güvenli Ödeme Yap (100 TL)</span>
                 </a>
 
-                <!-- Sipariş Numarası Giriş Alanı -->
+                <!-- Backend Onaylı Sipariş Numarası Giriş Alanı -->
                 <div class="pt-2 border-t border-pink-500/20 space-y-2">
                     <label class="block text-[11px] text-pink-300 font-semibold">Shopier Sipariş Numaranızı Girin:</label>
                     <div class="flex gap-2">
-                        <input type="text" id="orderNumberInput" placeholder="Örn: 849201" class="flex-1 px-3 py-2 bg-slate-900 border border-pink-500/40 rounded-xl text-xs text-white focus:outline-none focus:border-pink-500 text-center font-bold tracking-wider"/>
+                        <input type="text" id="orderNumberInput" placeholder="Örn: 123456" class="flex-1 px-3 py-2 bg-slate-900 border border-pink-500/40 rounded-xl text-xs text-white focus:outline-none focus:border-pink-500 text-center font-bold tracking-wider"/>
                         <button type="button" id="verifyOrderBtn" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs transition shadow">Sipariş No ile Aç 🔓</button>
                     </div>
-                    <div id="orderError" class="text-[10px] text-rose-400 hidden">Lütfen geçerli bir sipariş numarası girin!</div>
+                    <div id="orderError" class="text-[10px] text-rose-400 hidden">Geçersiz sipariş numarası!</div>
                 </div>
             </div>
 
-            <!-- Kilitli İçerikler (Ödeme Yapılmadan Önce Gizli) -->
+            <!-- Kilitli İçerikler -->
             <div id="lockedContent" class="mt-6 hidden space-y-6">
-                <!-- PDF İndirme ve Detaylar -->
                 <div class="flex justify-between items-center bg-slate-900 p-3 rounded-xl border border-slate-700">
                     <span class="text-xs text-emerald-400 font-bold">✅ Sipariş Onaylandı & Kilit Açıldı!</span>
                     <button type="button" id="downloadPdfBtn" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-xl font-bold text-xs transition border border-slate-600 text-white">PDF Raporu İndir 📄</button>
                 </div>
 
-                <!-- Detaylı Liste -->
                 <div id="resultList" class="space-y-2 max-h-52 overflow-y-auto pr-1"></div>
 
-                <!-- Instagram / TikTok Hikaye Şablonu -->
                 <div id="storySection" class="flex flex-col items-center">
                     <h3 class="text-xs font-semibold text-pink-400 mb-2">📸 Instagram / TikTok Hikaye Kartı</h3>
                     <div class="w-72 h-[440px] bg-gradient-to-tr from-black via-zinc-900 to-rose-950 border-2 border-pink-500 rounded-3xl p-5 flex flex-col justify-between shadow-2xl text-center relative overflow-hidden">
@@ -281,7 +280,6 @@ async def index():
             </div>
         </div>
 
-        <!-- Yazdırma / PDF İçin Gizli Rapor Alanı -->
         <div id="printReport" class="hidden p-8 text-black">
             <h1 class="text-2xl font-bold text-pink-600 mb-2">Kesişen Yollar - Analiz Raporu</h1>
             <p id="printMeta" class="text-sm text-gray-600 mb-4"></p>
@@ -304,26 +302,45 @@ async def index():
             let lastMeta = {};
 
             window.addEventListener('DOMContentLoaded', () => {
-                document.getElementById('verifyOrderBtn').onclick = () => {
+                document.getElementById('verifyOrderBtn').onclick = async () => {
                     const orderNo = document.getElementById('orderNumberInput').value.trim();
                     const errDiv = document.getElementById('orderError');
                     
-                    if (orderNo && orderNo.length >= 3) {
-                        localStorage.setItem('kesisen_odeme_yapildi', 'true');
-                        localStorage.setItem('kesisen_siparis_no', orderNo);
-                        errDiv.classList.add('hidden');
+                    if (!orderNo) {
+                        errDiv.innerText = "Lütfen sipariş numarası girin!";
+                        errDiv.classList.remove('hidden');
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch('/api/verify-order', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ order_number: orderNo })
+                        });
                         
-                        if (currentMatches.length > 0) {
-                            renderUnlockedContent({ matches: currentMatches, match_count: currentMatches.length });
+                        const result = await response.json();
+                        
+                        if (response.ok) {
+                            localStorage.setItem('kesisen_odeme_yapildi', 'true');
+                            localStorage.setItem('kesisen_siparis_no', orderNo);
+                            errDiv.classList.add('hidden');
+                            
+                            if (currentMatches.length > 0) {
+                                renderUnlockedContent({ matches: currentMatches, match_count: currentMatches.length });
+                            } else {
+                                alert('Sipariş numaranız doğrulandı! Şimdi dosyalarınızı yükleyebilirsiniz.');
+                            }
                         } else {
-                            alert('Sipariş numaranız kaydedildi! Lütfen analiz için dosyalarınızı yükleyin.');
+                            errDiv.innerText = result.detail || "Geçersiz sipariş numarası!";
+                            errDiv.classList.remove('hidden');
                         }
-                    } else {
+                    } catch (err) {
+                        errDiv.innerText = "Bağlantı hatası oluştu.";
                         errDiv.classList.remove('hidden');
                     }
                 };
 
-                // Yerel Canvas ile İlk Karşılaşma Detaylı Hikaye Görseli İndirme
                 document.getElementById('shareStoryBtn').onclick = () => {
                     const btn = document.getElementById('shareStoryBtn');
                     btn.innerText = "Görsel Hazırlanıyor... ⏳";
@@ -334,7 +351,6 @@ async def index():
                         canvas.height = 1920;
                         const ctx = canvas.getContext('2d');
                         
-                        // Arka Plan Gradient
                         const bgGrad = ctx.createLinearGradient(0, 0, 1080, 1920);
                         bgGrad.addColorStop(0, '#000000');
                         bgGrad.addColorStop(0.5, '#18181b');
@@ -342,7 +358,6 @@ async def index():
                         ctx.fillStyle = bgGrad;
                         ctx.fillRect(0, 0, 1080, 1920);
                         
-                        // Üst Kategori Badge
                         ctx.fillStyle = 'rgba(131, 24, 66, 0.6)';
                         ctx.strokeStyle = 'rgba(236, 72, 153, 0.4)';
                         ctx.lineWidth = 4;
@@ -356,12 +371,10 @@ async def index():
                         ctx.textAlign = 'center';
                         ctx.fillText('KADERİN CİMRİ OYUNU', 540, 378);
                         
-                        // Ana Başlık
                         ctx.fillStyle = '#ffffff';
                         ctx.font = 'bold 64px sans-serif';
                         ctx.fillText('Yollarımız Hep Kesilmiş! ⚡', 540, 480);
                         
-                        // Ortadaki Kutu (Card Container)
                         ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
                         ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
                         ctx.lineWidth = 4;
@@ -370,7 +383,6 @@ async def index():
                         ctx.fill();
                         ctx.stroke();
                         
-                        // Sayaç Sayısı
                         ctx.fillStyle = '#f472b6';
                         ctx.font = 'bold 120px sans-serif';
                         const countText = document.getElementById('storyCount').innerText;
@@ -380,7 +392,6 @@ async def index():
                         ctx.font = 'bold 34px sans-serif';
                         ctx.fillText('Ortak Noktada Buluşuldu', 540, 790);
                         
-                        // İlk Karşılaşma Detayı (Saat, Tarih ve Konum)
                         ctx.fillStyle = '#fbcfe8';
                         ctx.font = 'bold 28px sans-serif';
                         ctx.fillText('📍 İlk Karşılaşma Noktası & Zamanı', 540, 900);
@@ -397,7 +408,6 @@ async def index():
                             ctx.fillText(firstCoords, 540, 1015);
                         }
                         
-                        // Alt Etiket
                         ctx.fillStyle = '#f472b6';
                         ctx.font = 'bold 32px sans-serif';
                         ctx.fillText('#KesişenYollar', 540, 1720);
@@ -406,7 +416,6 @@ async def index():
                         ctx.font = '26px sans-serif';
                         ctx.fillText('Google Takeout AI', 540, 1770);
                         
-                        // İndirme Tetikleme
                         const image = canvas.toDataURL('image/png');
                         const a = document.createElement('a');
                         a.href = image;
@@ -494,12 +503,14 @@ async def index():
                 document.getElementById('storyCount').innerText = data.match_count;
                 
                 if (data.matches.length > 0) {
-                    const first = data.matches[0];
-                    document.getElementById('firstMatchDesc').innerHTML = `
-                        <span class="font-semibold text-white">İlk Karşılaşma:</span><br/>
-                        <span id="firstMatchDescText" class="text-pink-300 font-bold">P1: ${first.time1} | P2: ${first.time2}</span><br/>
-                        <span id="firstMatchCoords" class="text-[9px] font-mono text-slate-400">Koord: ${first.lat}, ${first.lng} (${first.distance_meters}m)</span>
-                    `;
+                    const first = data.matches.length > 0 ? data.matches[0] : null;
+                    if (first) {
+                        document.getElementById('firstMatchDesc').innerHTML = `
+                            <span class="font-semibold text-white">İlk Karşılaşma:</span><br/>
+                            <span id="firstMatchDescText" class="text-pink-300 font-bold">P1: ${first.time1} | P2: ${first.time2}</span><br/>
+                            <span id="firstMatchCoords" class="text-[9px] font-mono text-slate-400">Koord: ${first.lat}, ${first.lng} (${first.distance_meters}m)</span>
+                        `;
+                    }
                 }
             }
 
