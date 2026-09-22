@@ -165,7 +165,6 @@ async def index():
         <meta charset="UTF-8">
         <title>Kesişen Yollar</title>
         <script src="https://cdn.tailwindcss.com"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
         <style>
             @media print {
                 body { background: white !important; color: black !important; }
@@ -248,22 +247,24 @@ async def index():
                 <!-- Instagram / TikTok Hikaye Şablonu -->
                 <div id="storySection" class="flex flex-col items-center">
                     <h3 class="text-xs font-semibold text-pink-400 mb-2">📸 Instagram / TikTok Hikaye Kartı</h3>
-                    <div class="w-72 h-[420px] bg-gradient-to-tr from-black via-zinc-900 to-rose-950 border-2 border-pink-500 rounded-3xl p-6 flex flex-col justify-between shadow-2xl text-center relative overflow-hidden">
+                    <div class="w-72 h-[440px] bg-gradient-to-tr from-black via-zinc-900 to-rose-950 border-2 border-pink-500 rounded-3xl p-5 flex flex-col justify-between shadow-2xl text-center relative overflow-hidden">
                         <div class="absolute top-0 right-0 w-36 h-36 bg-pink-600/30 rounded-full blur-3xl"></div>
                         <div class="absolute bottom-0 left-0 w-36 h-36 bg-purple-600/30 rounded-full blur-3xl"></div>
                         
                         <div class="relative z-10">
-                            <span class="text-[10px] tracking-widest uppercase text-pink-400 font-extrabold px-3 py-1 bg-pink-950/60 rounded-full border border-pink-500/40">KADERIN CIMRI OYUNU</span>
-                            <h2 class="text-xl font-black mt-3 text-white tracking-wide">Yollarımız Hep Kesilmiş! ⚡</h2>
+                            <span class="text-[9px] tracking-widest uppercase text-pink-400 font-extrabold px-3 py-1 bg-pink-950/60 rounded-full border border-pink-500/40">KADERIN CIMRI OYUNU</span>
+                            <h2 class="text-lg font-black mt-2 text-white tracking-wide">Yollarımız Hep Kesilmiş! ⚡</h2>
                         </div>
                         
-                        <div class="relative z-10 my-auto space-y-2 bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/20 shadow-inner">
-                            <div class="text-4xl font-black text-pink-400 drop-shadow" id="storyCount">0</div>
-                            <div class="text-xs text-white font-bold tracking-wide">Ortak Noktada Buluşuldu</div>
-                            <div class="text-[10px] text-pink-200 mt-1 italic" id="storyDesc">"Birbirimizden habersiz aynı yerlerden geçmişiz..."</div>
+                        <div class="relative z-10 my-auto space-y-2 bg-white/10 backdrop-blur-md p-3 rounded-2xl border border-white/20 shadow-inner">
+                            <div class="text-3xl font-black text-pink-400 drop-shadow" id="storyCount">0</div>
+                            <div class="text-[11px] text-white font-bold">Ortak Noktada Buluşuldu</div>
+                            <div class="text-[10px] text-pink-200 border-t border-white/10 pt-1.5 mt-1" id="firstMatchDesc">
+                                <span class="font-semibold text-white">İlk Karşılaşma:</span> Yükleniyor...
+                            </div>
                         </div>
                         
-                        <button id="shareStoryBtn" type="button" class="mt-4 w-full py-2.5 bg-gradient-to-r from-purple-600 to-pink-600 hover:opacity-90 text-white rounded-xl font-bold text-xs shadow-lg transition flex items-center justify-center gap-2 cursor-pointer"><span>Hikaye Görselini İndir / Paylaş 🚀</span></button>
+                        <button id="shareStoryBtn" type="button" class="mt-2 w-full py-2.5 bg-gradient-to-r from-purple-600 to-pink-600 hover:opacity-90 text-white rounded-xl font-bold text-xs shadow-lg transition flex items-center justify-center gap-2 cursor-pointer"><span>Hikaye Görselini İndir / Paylaş 🚀</span></button>
                         <div class="relative z-10 flex justify-between items-center text-[9px] text-slate-400 px-1 border-t border-white/10 pt-2">
                             <span class="font-bold text-pink-400">#KesişenYollar</span>
                             <span>Google Takeout AI</span>
@@ -296,7 +297,6 @@ async def index():
             let lastMeta = {};
 
             window.addEventListener('DOMContentLoaded', () => {
-                // Sipariş numarası doğrulama butonu
                 document.getElementById('verifyOrderBtn').onclick = () => {
                     const orderNo = document.getElementById('orderNumberInput').value.trim();
                     const errDiv = document.getElementById('orderError');
@@ -316,15 +316,83 @@ async def index():
                     }
                 };
 
-                // Hikaye Görselini İndirme Butonu
-                document.getElementById('shareStoryBtn').onclick = async () => {
+                // Yerel Canvas ile %100 Çalışan Hikaye Kartı İndirme
+                document.getElementById('shareStoryBtn').onclick = () => {
                     const btn = document.getElementById('shareStoryBtn');
                     btn.innerText = "Görsel Hazırlanıyor... ⏳";
                     
                     try {
-                        const storyCard = document.querySelector('#storySection .w-72');
-                        const canvas = await html2canvas(storyCard, { scale: 2, useCORS: true, backgroundColor: null });
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 1080;
+                        canvas.height = 1920;
+                        const ctx = canvas.getContext('2d');
                         
+                        // Arka Plan Gradient
+                        const bgGrad = ctx.createLinearGradient(0, 0, 1080, 1920);
+                        bgGrad.addColorStop(0, '#000000');
+                        bgGrad.addColorStop(0.5, '#18181b');
+                        bgGrad.addColorStop(1, '#4c0519');
+                        ctx.fillStyle = bgGrad;
+                        ctx.fillRect(0, 0, 1080, 1920);
+                        
+                        // Üst Kategori Badge
+                        ctx.fillStyle = 'rgba(131, 24, 66, 0.6)';
+                        ctx.strokeStyle = 'rgba(236, 72, 153, 0.4)';
+                        ctx.lineWidth = 4;
+                        ctx.beginPath();
+                        ctx.roundRect(290, 350, 500, 90, 45);
+                        ctx.fill();
+                        ctx.stroke();
+                        
+                        ctx.fillStyle = '#f472b6';
+                        ctx.font = 'bold 28px sans-serif';
+                        ctx.textAlign = 'center';
+                        ctx.fillText('KADERİN CİMRİ OYUNU', 540, 408);
+                        
+                        // Ana Başlık
+                        ctx.fillStyle = '#ffffff';
+                        ctx.font = 'bold 64px sans-serif';
+                        ctx.fillText('Yollarımız Hep Kesilmiş! ⚡', 540, 520);
+                        
+                        // Ortadaki Kutu (Card Container)
+                        ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+                        ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                        ctx.lineWidth = 4;
+                        ctx.beginPath();
+                        ctx.roundRect(140, 680, 800, 560, 40);
+                        ctx.fill();
+                        ctx.stroke();
+                        
+                        // Sayaç Sayısı
+                        ctx.fillStyle = '#f472b6';
+                        ctx.font = 'bold 130px sans-serif';
+                        const countText = document.getElementById('storyCount').innerText;
+                        ctx.fillText(countText, 540, 840);
+                        
+                        ctx.fillStyle = '#ffffff';
+                        ctx.font = 'bold 36px sans-serif';
+                        ctx.fillText('Ortak Noktada Buluşuldu', 540, 910);
+                        
+                        // İlk Karşılaşma Detayı
+                        ctx.fillStyle = '#fbcfe8';
+                        ctx.font = '28px sans-serif';
+                        ctx.fillText('İlk Karşılaşma:', 540, 1020);
+                        
+                        ctx.fillStyle = '#ffffff';
+                        ctx.font = 'bold 26px sans-serif';
+                        const firstDesc = document.getElementById('firstMatchDescText') ? document.getElementById('firstMatchDescText').innerText : 'Birlikte aynı yerden geçildi';
+                        ctx.fillText(firstDesc, 540, 1075);
+                        
+                        // Alt Etiket
+                        ctx.fillStyle = '#f472b6';
+                        ctx.font = 'bold 32px sans-serif';
+                        ctx.fillText('#KesişenYollar', 540, 1720);
+                        
+                        ctx.fillStyle = '#94a3b8';
+                        ctx.font = '26px sans-serif';
+                        ctx.fillText('Google Takeout AI', 540, 1770);
+                        
+                        // İndirme Tetikleme
                         const image = canvas.toDataURL('image/png');
                         const a = document.createElement('a');
                         a.href = image;
@@ -333,7 +401,7 @@ async def index():
                         
                         btn.innerText = "Hikaye Görselini İndir / Paylaş 🚀";
                     } catch (err) {
-                        alert('Görsel indirilirken bir hata oluştu. Ekran görüntüsü alarak paylaşabilirsiniz!');
+                        alert('Görsel oluşturulurken bir hata oluştu.');
                         btn.innerText = "Hikaye Görselini İndir / Paylaş 🚀";
                     }
                 };
@@ -410,6 +478,11 @@ async def index():
                 });
                 document.getElementById('resultList').innerHTML = listHtml;
                 document.getElementById('storyCount').innerText = data.match_count;
+                
+                if (data.matches.length > 0) {
+                    const first = data.matches[0];
+                    document.getElementById('firstMatchDesc').innerHTML = `<span class="font-semibold text-white">İlk Karşılaşma:</span> <span id="firstMatchDescText">${first.time1}</span>`;
+                }
             }
 
             document.getElementById('downloadPdfBtn').onclick = () => {
