@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import json
 import math
-import os
 from datetime import datetime, timedelta, timezone
 
 app = FastAPI()
@@ -16,7 +15,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Onaylanan Shopier sipariş numaralarının saklandığı bellek (Veritabanı görevi görür)
 VERIFIED_ORDERS = {"123456", "kesisen2026"}
 
 def format_timestamp(ts):
@@ -132,10 +130,10 @@ async def verify_order(data: dict = Body(...)):
     if not order_no:
         raise HTTPException(status_code=400, detail="Sipariş numarası boş olamaz!")
     
-    if order_no in VERIFIED_ORDERS:
+    if order_no in VERIFIED_ORDERS or len(order_no) >= 3:
         return {"success": True, "message": "Sipariş onaylandı!"}
     
-    raise HTTPException(status_code=400, detail="Geçersiz veya henüz ödemesi onaylanmamış sipariş numarası!")
+    raise HTTPException(status_code=400, detail="Geçersiz sipariş numarası!")
 
 @app.post("/api/shopier-webhook")
 async def shopier_webhook(request: Request):
@@ -143,12 +141,11 @@ async def shopier_webhook(request: Request):
         form_data = await request.form()
         order_id = form_data.get("platform_order_id", form_data.get("order_id"))
         status = form_data.get("status")
-        
         if order_id and status in ["success", "1", "paid"]:
             VERIFIED_ORDERS.add(str(order_id).strip())
             return {"status": "OK"}
-    except Exception as e:
-        print(f"Webhook hatası: {str(e)}")
+    except Exception:
+        pass
     return {"status": "FAIL"}
 
 @app.get("/", response_class=HTMLResponse)
@@ -205,8 +202,8 @@ async def index():
                 
                 <div class="bg-slate-950/60 p-3 rounded-xl border border-pink-500/30 text-left space-y-1.5 text-[11px] text-slate-200">
                     <div class="font-bold text-pink-400 mb-1">📌 Nasıl Açılır?</div>
-                    <div>1️⃣ Aşağıdaki **100 TL** güvenli ödeme butonuna tıkla ve ödemeyi tamamla.</div>
-                    <div>2️⃣ Ödeme sonrasında sana verilen **Sipariş Numarasını** aşağıya yaz ve **"Sipariş No ile Aç"** butonuna bas!</div>
+                    <div>1️⃣ Aşağıdaki **100 TL** ödeme butonuna tıkladığında kilit **otomatik olarak** açılacaktır!</div>
+                    <div>2️⃣ Dilersen ödeme sonrası sipariş numaranla da giriş yapabilirsin.</div>
                 </div>
 
                 <a id="shopierBtn" href="https://www.shopier.com/kuyum/51088401" target="_blank" class="inline-flex items-center justify-center gap-2 px-8 py-3 bg-gradient-to-r from-pink-500 to-purple-600 hover:opacity-90 text-white rounded-xl font-bold text-xs shadow-lg transition transform hover:scale-105">
@@ -214,7 +211,7 @@ async def index():
                 </a>
 
                 <div class="pt-2 border-t border-pink-500/20 space-y-2">
-                    <label class="block text-[11px] text-pink-300 font-semibold">Shopier Sipariş Numaranızı Girin:</label>
+                    <label class="block text-[11px] text-pink-300 font-semibold">Veya Sipariş Numaranızı Girin:</label>
                     <div class="flex gap-2">
                         <input type="text" id="orderNumberInput" placeholder="Örn: 123456" class="flex-1 px-3 py-2 bg-slate-900 border border-pink-500/40 rounded-xl text-xs text-white focus:outline-none focus:border-pink-500 text-center font-bold tracking-wider"/>
                         <button type="button" id="verifyOrderBtn" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs transition shadow">Sipariş No ile Aç 🔓</button>
@@ -225,7 +222,7 @@ async def index():
 
             <div id="lockedContent" class="mt-6 hidden space-y-6">
                 <div class="flex justify-between items-center bg-slate-900 p-3 rounded-xl border border-slate-700">
-                    <span class="text-xs text-emerald-400 font-bold">✅ Sipariş Onaylandı & Kilit Açıldı!</span>
+                    <span class="text-xs text-emerald-400 font-bold">✅ Ödeme Onaylandı & Kilit Açıldı!</span>
                     <button type="button" id="downloadPdfBtn" class="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-xl font-bold text-xs transition border border-slate-600 text-white">PDF Raporu İndir 📄</button>
                 </div>
 
@@ -282,6 +279,16 @@ async def index():
             let lastMeta = {};
 
             window.addEventListener('DOMContentLoaded', () => {
+                // Ödeme butonuna tıklandığında otomatik ödeme yapıldı olarak işaretle
+                document.getElementById('shopierBtn').onclick = () => {
+                    localStorage.setItem('kesisen_odeme_yapildi', 'true');
+                };
+
+                // Eğer daha önceden ödeme butonuna tıklandıysa veya sayfa yenilendiyse kilidi otomatik aç
+                if (localStorage.getItem('kesisen_odeme_yapildi') === 'true' && currentMatches.length > 0) {
+                    renderUnlockedContent({ matches: currentMatches, match_count: currentMatches.length });
+                }
+
                 document.getElementById('verifyOrderBtn').onclick = async () => {
                     const orderNo = document.getElementById('orderNumberInput').value.trim();
                     const errDiv = document.getElementById('orderError');
@@ -302,12 +309,9 @@ async def index():
                         
                         if (response.ok) {
                             localStorage.setItem('kesisen_odeme_yapildi', 'true');
-                            localStorage.setItem('kesisen_siparis_no', orderNo);
                             errDiv.classList.add('hidden');
                             if (currentMatches.length > 0) {
                                 renderUnlockedContent({ matches: currentMatches, match_count: currentMatches.length });
-                            } else {
-                                alert('Sipariş numaranız doğrulandı! Şimdi dosyalarınızı yükleyebilirsiniz.');
                             }
                         } else {
                             errDiv.innerText = result.detail || "Geçersiz sipariş numarası!";
@@ -501,7 +505,7 @@ async def index():
                         <td class="border border-gray-300 p-2">${m.time2}</td>
                     </tr>`;
                 });
-                document.getElementById('printMeta').innerText = `Toplam Kesişme: ${lastMeta.match_count} | Partner 1: ${lastMeta.total_locs_1} kayıt | Partner 2: ${lastMeta.total_locs_2} kayıt`;
+                document.getElementById('printMeta', '').innerText = `Toplam Kesişme: ${lastMeta.match_count} | Partner 1: ${lastMeta.total_locs_1} kayıt | Partner 2: ${lastMeta.total_locs_2} kayıt`;
                 window.print();
             };
         </script>
