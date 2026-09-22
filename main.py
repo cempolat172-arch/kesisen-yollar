@@ -1,8 +1,9 @@
-from fastapi import FastAPI, File, HTTPException, UploadFile, Body
+from fastapi import FastAPI, File, HTTPException, UploadFile, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import json
 import math
+import os
 from datetime import datetime, timedelta, timezone
 
 app = FastAPI()
@@ -15,20 +16,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Örnek Onaylı Shopier Sipariş Numaraları (Buraya gerçek sipariş numaralarını ekleyebilirsin)
-VALID_ORDER_NUMBERS = {"123456", "987654", "test123", "kesisen2026"}
+# Onaylanan Shopier sipariş numaralarının saklandığı bellek (Veritabanı görevi görür)
+VERIFIED_ORDERS = {"123456", "kesisen2026"}
 
 def format_timestamp(ts):
     if not ts or ts == "Bilinmiyor" or ts == 0 or ts == "0":
         return "Tarih Bulunamadı"
     try:
         tr_tz = timezone(timedelta(hours=3))
-        
         if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.isdigit()):
             ts_val = float(ts)
             if ts_val <= 0:
                 return "Tarih Bulunamadı"
-            if ts_val > 1e11:  # Milisaniye
+            if ts_val > 1e11:
                 ts_val /= 1000.0
             dt = datetime.fromtimestamp(ts_val, tz=timezone.utc).astimezone(tr_tz)
             if dt.year < 2010:
@@ -54,18 +54,11 @@ def parse_takeout(file_content: str):
         raise HTTPException(status_code=400, detail=f"Geçersiz JSON formatı: {str(e)}")
     
     locations = []
-    
-    if isinstance(data, dict):
-        items = data.get("timelineObjects", data.get("locations", []))
-    elif isinstance(data, list):
-        items = data
-    else:
-        items = []
+    items = data.get("timelineObjects", data.get("locations", [])) if isinstance(data, dict) else (data if isinstance(data, list) else [])
         
     for item in items:
         if not isinstance(item, dict):
             continue
-            
         if "visit" in item and isinstance(item["visit"], dict):
             visit = item["visit"]
             place_loc = visit.get("placeLocation", {})
@@ -76,11 +69,7 @@ def parse_takeout(file_content: str):
                         lat_lng = geo_str.replace("geo:", "").split(",")
                         if len(lat_lng) == 2:
                             raw_time = visit.get("startTime", visit.get("duration", {}).get("startTimestamp", "Bilinmiyor"))
-                            locations.append({
-                                "lat": float(lat_lng[0]),
-                                "lng": float(lat_lng[1]),
-                                "time": format_timestamp(raw_time)
-                            })
+                            locations.append({"lat": float(lat_lng[0]), "lng": float(lat_lng[1]), "time": format_timestamp(raw_time)})
                     except ValueError:
                         continue
                         
@@ -93,49 +82,32 @@ def parse_takeout(file_content: str):
                             lat_lng = geo_str.replace("geo:", "").split(",")
                             if len(lat_lng) == 2:
                                 raw_time = path_point.get("time", path_point.get("durationMinutesOffsetFromStartTime", "Bilinmiyor"))
-                                locations.append({
-                                    "lat": float(lat_lng[0]),
-                                    "lng": float(lat_lng[1]),
-                                    "time": format_timestamp(raw_time)
-                                })
+                                locations.append({"lat": float(lat_lng[0]), "lng": float(lat_lng[1]), "time": format_timestamp(raw_time)})
                         except ValueError:
                             continue
                             
-        lat = item.get("latitudeE7")
-        lng = item.get("longitudeE7")
+        lat, lng = item.get("latitudeE7"), item.get("longitudeE7")
         if lat and lng:
-            locations.append({
-                "lat": lat / 1e7,
-                "lng": lng / 1e7,
-                "time": format_timestamp(item.get("timestamp", item.get("timestampMs", "Bilinmiyor")))
-            })
+            locations.append({"lat": lat / 1e7, "lng": lng / 1e7, "time": format_timestamp(item.get("timestamp", item.get("timestampMs", "Bilinmiyor")))})
             
-        lat_std = item.get("latitude")
-        lng_std = item.get("longitude")
+        lat_std, lng_std = item.get("latitude"), item.get("longitude")
         if lat_std and lng_std:
-            locations.append({
-                "lat": float(lat_std),
-                "lng": float(lng_std),
-                "time": format_timestamp(item.get("timestamp", item.get("timestampMs", "Bilinmiyor")))
-            })
+            locations.append({"lat": float(lat_std), "lng": float(lng_std), "time": format_timestamp(item.get("timestamp", item.get("timestampMs", "Bilinmiyor")))})
             
     return locations
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     R = 6371000
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
     delta_lambda = math.radians(lon2 - lon1)
     a = math.sin(delta_phi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
+    return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
 @app.post("/api/compare-together")
 async def compare_together(file1: UploadFile = File(...), file2: UploadFile = File(...)):
     content1 = await file1.read()
     content2 = await file2.read()
-    
     locs1 = parse_takeout(content1.decode("utf-8", errors="ignore"))
     locs2 = parse_takeout(content2.decode("utf-8", errors="ignore"))
     
@@ -152,19 +124,32 @@ async def compare_together(file1: UploadFile = File(...), file2: UploadFile = Fi
                     "time2": l2["time"]
                 })
                 
-    return {
-        "match_count": len(matches),
-        "matches": matches[:30],
-        "total_locs_1": len(locs1),
-        "total_locs_2": len(locs2)
-    }
+    return {"match_count": len(matches), "matches": matches[:30], "total_locs_1": len(locs1), "total_locs_2": len(locs2)}
 
 @app.post("/api/verify-order")
 async def verify_order(data: dict = Body(...)):
     order_no = data.get("order_number", "").strip()
-    if order_no in VALID_ORDER_NUMBERS:
+    if not order_no:
+        raise HTTPException(status_code=400, detail="Sipariş numarası boş olamaz!")
+    
+    if order_no in VERIFIED_ORDERS:
         return {"success": True, "message": "Sipariş onaylandı!"}
-    raise HTTPException(status_code=400, detail="Geçersiz veya henüz onaylanmamış sipariş numarası!")
+    
+    raise HTTPException(status_code=400, detail="Geçersiz veya henüz ödemesi onaylanmamış sipariş numarası!")
+
+@app.post("/api/shopier-webhook")
+async def shopier_webhook(request: Request):
+    try:
+        form_data = await request.form()
+        order_id = form_data.get("platform_order_id", form_data.get("order_id"))
+        status = form_data.get("status")
+        
+        if order_id and status in ["success", "1", "paid"]:
+            VERIFIED_ORDERS.add(str(order_id).strip())
+            return {"status": "OK"}
+    except Exception as e:
+        print(f"Webhook hatası: {str(e)}")
+    return {"status": "FAIL"}
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -188,7 +173,6 @@ async def index():
             <h1 class="text-2xl font-bold mb-1 text-pink-500 text-center">Kesişen Yollar</h1>
             <p class="text-xs text-slate-400 text-center mb-4">Temizlenmiş Zaman Damgası & Hikaye Modu</p>
             
-            <!-- Dosya Nasıl Alınır Bilgilendirme Kutusu -->
             <div class="mb-4 bg-slate-900/80 p-3 rounded-xl border border-slate-700 text-[11px] text-slate-300 space-y-1">
                 <div class="font-bold text-pink-400 flex items-center gap-1">
                     <span>💡</span> Google Konum Geçmişi (JSON) Nasıl Yüklenir?
@@ -212,10 +196,8 @@ async def index():
                 </div>
             </form>
             
-            <!-- Analiz Özet Bilgisi -->
             <div id="summaryResult" class="mt-4"></div>
 
-            <!-- Shopier Ödeme ve Kilit Alanı -->
             <div id="paymentLockSection" class="mt-6 hidden p-6 bg-gradient-to-r from-purple-900/90 to-pink-900/90 border border-pink-500/60 rounded-2xl text-center space-y-4 shadow-2xl">
                 <div class="inline-flex items-center justify-center w-12 h-12 bg-pink-500/20 text-pink-400 rounded-full mb-1 text-xl">🔒</div>
                 <h3 class="text-lg font-bold text-white">Raporu ve Hikaye Kartını Aç</h3>
@@ -231,7 +213,6 @@ async def index():
                     <span>💳 Güvenli Ödeme Yap (100 TL)</span>
                 </a>
 
-                <!-- Backend Onaylı Sipariş Numarası Giriş Alanı -->
                 <div class="pt-2 border-t border-pink-500/20 space-y-2">
                     <label class="block text-[11px] text-pink-300 font-semibold">Shopier Sipariş Numaranızı Girin:</label>
                     <div class="flex gap-2">
@@ -242,7 +223,6 @@ async def index():
                 </div>
             </div>
 
-            <!-- Kilitli İçerikler -->
             <div id="lockedContent" class="mt-6 hidden space-y-6">
                 <div class="flex justify-between items-center bg-slate-900 p-3 rounded-xl border border-slate-700">
                     <span class="text-xs text-emerald-400 font-bold">✅ Sipariş Onaylandı & Kilit Açıldı!</span>
@@ -318,14 +298,12 @@ async def index():
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ order_number: orderNo })
                         });
-                        
                         const result = await response.json();
                         
                         if (response.ok) {
                             localStorage.setItem('kesisen_odeme_yapildi', 'true');
                             localStorage.setItem('kesisen_siparis_no', orderNo);
                             errDiv.classList.add('hidden');
-                            
                             if (currentMatches.length > 0) {
                                 renderUnlockedContent({ matches: currentMatches, match_count: currentMatches.length });
                             } else {
@@ -461,7 +439,6 @@ async def index():
                         
                         if(data.match_count > 0) {
                             const isPaid = localStorage.getItem('kesisen_odeme_yapildi') === 'true';
-                            
                             if (isPaid) {
                                 renderUnlockedContent(data);
                             } else {
@@ -503,14 +480,12 @@ async def index():
                 document.getElementById('storyCount').innerText = data.match_count;
                 
                 if (data.matches.length > 0) {
-                    const first = data.matches.length > 0 ? data.matches[0] : null;
-                    if (first) {
-                        document.getElementById('firstMatchDesc').innerHTML = `
-                            <span class="font-semibold text-white">İlk Karşılaşma:</span><br/>
-                            <span id="firstMatchDescText" class="text-pink-300 font-bold">P1: ${first.time1} | P2: ${first.time2}</span><br/>
-                            <span id="firstMatchCoords" class="text-[9px] font-mono text-slate-400">Koord: ${first.lat}, ${first.lng} (${first.distance_meters}m)</span>
-                        `;
-                    }
+                    const first = data.matches[0];
+                    document.getElementById('firstMatchDesc').innerHTML = `
+                        <span class="font-semibold text-white">İlk Karşılaşma:</span><br/>
+                        <span id="firstMatchDescText" class="text-pink-300 font-bold">P1: ${first.time1} | P2: ${first.time2}</span><br/>
+                        <span id="firstMatchCoords" class="text-[9px] font-mono text-slate-400">Koord: ${first.lat}, ${first.lng} (${first.distance_meters}m)</span>
+                    `;
                 }
             }
 
